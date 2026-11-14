@@ -225,6 +225,11 @@ export function createVoiceTurnController(params: {
     if (turn.fired || turn.committedSegmentIds.length === 0) {
       return;
     }
+    // A turn still pending when new speech started waits for that speech and
+    // goes out as one transcript with it (handleSpeechStopped).
+    if (state.status === "capturing") {
+      return;
+    }
 
     const allCommittedSegmentsFinal = turn.committedSegmentIds.every((segmentId) =>
       turn.finalTranscriptSegmentIds.has(segmentId),
@@ -410,7 +415,6 @@ export function createVoiceTurnController(params: {
     partialTranscriptFired = false;
     reconnectAttemptedForTurn = false;
     clearFinalizingTurnTimeout();
-    currentFinalizingTurn = null;
     state = {
       status: "capturing",
       utteranceId: uuidv4(),
@@ -435,7 +439,18 @@ export function createVoiceTurnController(params: {
 
     state = { status: "listening" };
 
-    const finalizingTurn: FinalizingVoiceTurn = {
+    const pendingTurn =
+      currentFinalizingTurn && !currentFinalizingTurn.fired ? currentFinalizingTurn : null;
+    if (pendingTurn) {
+      pendingTurn.timeout = setTimeout(() => {
+        fireFinalTranscript(pendingTurn, "timeout");
+      }, VOICE_FINAL_TRANSCRIPT_TIMEOUT_MS);
+      params.logger.info(
+        { turnId: pendingTurn.turnId, utteranceId: turnId },
+        "voice_turn.merged_into_pending_turn",
+      );
+    }
+    const finalizingTurn: FinalizingVoiceTurn = pendingTurn ?? {
       turnId,
       startedAt,
       committedSegmentIds: [],
