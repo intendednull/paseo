@@ -1,0 +1,45 @@
+Subject: fix(server): report completion after waking remote closed agents
+
+A prompt sent to a closed agent on another host is queued there (two quiet
+seconds) before it resumes the agent. The caller daemon opens its finish
+observation as soon as the remote acknowledges the queued prompt, so its
+first refresh reads the old "closed" snapshot, waitForFinish(100) times out
+behind the queue, and the code re-fetched that same closed snapshot and fed
+it to the handler as terminal. The subscription delivered "was closed" and
+was consumed before the resumed turn ran, so no "finished" ever arrived.
+On a timed-out wait, report nothing (keeping a permission_resolved
+checkpoint); the outcome comes from the dispatch-aware wait or a later
+turn_completed event.
+
+Issue: remote finish notifications lost after remote reboot (2026-11-14)
+Applies-To: Paseo 0.15.2 resources/app.asar
+Upstream-Status: backport of getpaseo/paseo 5062d5ee9 (#8575), in v0.16.0-beta.1
+Drop-When: Paseo >= 0.16.0
+
+--- a/node_modules/@getpaseo/server/dist/server/server/agent/host-operations/index.js
++++ b/node_modules/@getpaseo/server/dist/server/server/agent/host-operations/index.js
+@@ -334,14 +334,17 @@
+                     // A new turn may start between the snapshot and the current-response read.
+                     // Bound that wait and refresh state instead of attributing the old event to it.
+                     const current = await client.waitForFinish(agentId, 100);
+-                    if (current.status === "timeout")
+-                        snapshot = (await client.fetchAgent(agentId))?.agent ?? null;
+-                    else {
+-                        if (!current.final && current.error && current.error !== `Agent not found: ${agentId}`)
+-                            throw new Error(current.error);
+-                        snapshot = current.final;
+-                        lastMessage = current.lastMessage;
++                    if (current.status === "timeout") {
++                        // Queued delivery can leave a closed/error snapshot visible before the new turn.
++                        // A timed-out wait has not established an outcome for that queued work.
++                        if (event?.type === "permission_resolved")
++                            handler(snapshot, event);
++                        return;
+                     }
++                    if (!current.final && current.error && current.error !== `Agent not found: ${agentId}`)
++                        throw new Error(current.error);
++                    snapshot = current.final;
++                    lastMessage = current.lastMessage;
+                 }
+                 handler(snapshot, event, lastMessage);
+             };
