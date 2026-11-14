@@ -51,6 +51,7 @@ export function getFeatureHighlightColor(featureId: string): FeatureHighlightCol
     case SPEED_FEATURE_ID:
       return "yellow";
     case "auto_accept":
+    case "ultracode":
       return "green";
     case PLAN_MODE_FEATURE_ID:
       return "blue";
