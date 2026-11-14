@@ -9,6 +9,7 @@ import type {
   SidebarProjectEntry,
   SidebarWorkspaceEntry,
 } from "@/hooks/use-sidebar-workspaces-list";
+import type { WorkspaceSort } from "@/projects/workspace-structure";
 import type { SidebarGroupMode } from "@/stores/sidebar-view-store";
 import {
   resolveSidebarProjectIconTargets,
@@ -43,13 +44,15 @@ export interface SidebarProjectionInput {
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
   projectNamesByViewKey: Map<string, string>;
   groupMode: SidebarGroupMode;
+  workspaceSort?: WorkspaceSort;
   pinnedCollapsed: boolean;
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
   t: TFunction;
 }
 
-export function buildSidebarProjection(input: SidebarProjectionInput): SidebarProjection {
+export function buildSidebarProjection(rawInput: SidebarProjectionInput): SidebarProjection {
+  const input = rawInput.workspaceSort === "activity" ? sortProjectsByActivity(rawInput) : rawInput;
   const pinnedGroups = splitPinnedSidebarGroups({
     projects: input.projects,
     keys: input.pinnedKeys,
@@ -100,9 +103,32 @@ function buildWorkspaceGroups(
   switch (input.groupMode) {
     case "project":
       return [];
-    case "status":
-      return statusWorkspaceGroups(
-        buildStatusGroups(unpinnedWorkspaces, input.projectNamesByViewKey, input.t),
-      );
+    case "status": {
+      const groups = buildStatusGroups(unpinnedWorkspaces, input.projectNamesByViewKey, input.t);
+      if (input.workspaceSort === "activity") {
+        // buildStatusGroups returns fresh row arrays, so sorting them in place is safe.
+        for (const group of groups) group.rows.sort(byNewestActivity);
+      }
+      return statusWorkspaceGroups(groups);
+    }
   }
+}
+
+function byNewestActivity(left: SidebarWorkspaceEntry, right: SidebarWorkspaceEntry): number {
+  return (right.activityAt ?? 0) - (left.activityAt ?? 0);
+}
+
+/** Orders each project's workspaces newest activity first; project and pinned order stay. */
+function sortProjectsByActivity(input: SidebarProjectionInput): SidebarProjectionInput {
+  const activityAt = (workspaceKey: string) =>
+    input.workspaceEntriesByKey.get(workspaceKey)?.activityAt ?? 0;
+  return {
+    ...input,
+    projects: input.projects.map((project) => ({
+      ...project,
+      workspaces: [...project.workspaces].sort(
+        (left, right) => activityAt(right.workspaceKey) - activityAt(left.workspaceKey),
+      ),
+    })),
+  };
 }

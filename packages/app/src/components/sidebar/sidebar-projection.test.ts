@@ -139,6 +139,36 @@ describe("buildSidebarProjection", () => {
     });
   }
 
+  for (const groupMode of ["project", "status"] as const) {
+    it(`orders ${groupMode} rows by newest activity under the activity sort`, () => {
+      const older = makeWorkspace("older", "done");
+      const newer = makeWorkspace("newer", "done");
+      older.entry.activityAt = 1_000;
+      newer.entry.activityAt = 2_000;
+      const input = {
+        ...projectionInput({ groupMode }),
+        projects: [makeProject([older.placement, newer.placement])],
+        pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+        workspaceEntriesByKey: new Map([
+          [older.entry.workspaceKey, older.entry],
+          [newer.entry.workspaceKey, newer.entry],
+        ]),
+      };
+
+      const rows = (projection: ReturnType<typeof buildSidebarProjection>) =>
+        groupMode === "project"
+          ? projection.pinnedGroups.unpinnedProjects[0]?.workspaces
+          : projection.workspaceGroups[0]?.rows;
+      const activityOrder = () =>
+        rows(buildSidebarProjection({ ...input, workspaceSort: "activity" }))?.map(
+          (entry) => entry.workspaceId,
+        );
+      expect(activityOrder()).toEqual(["newer", "older"]);
+      older.entry.activityAt = 3_000;
+      expect(activityOrder()).toEqual(["older", "newer"]);
+    });
+  }
+
   it("uses one pin-aware projection for project rows and shortcut order", () => {
     const projection = buildSidebarProjection(projectionInput());
 
