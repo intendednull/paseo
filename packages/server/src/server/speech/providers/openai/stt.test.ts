@@ -21,6 +21,12 @@ vi.mock("openai", () => ({
 
 import { OpenAISTT } from "./stt.js";
 
+async function streamByteLength(stream: NodeJS.ReadableStream): Promise<number> {
+  let size = 0;
+  for await (const chunk of stream) size += (chunk as Buffer).length;
+  return size;
+}
+
 describe("OpenAISTT", () => {
   afterEach(() => {
     openAiConstructorOptionsMock.mockReset();
@@ -86,5 +92,44 @@ describe("OpenAISTT", () => {
         response_format: "json",
       }),
     );
+  });
+
+  test("keeps audio appended while a commit's request is in flight", async () => {
+    const uploadedBytes: number[] = [];
+    let releaseFirst: () => void = () => {};
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    transcriptionsCreateMock.mockImplementation(
+      async (request: { file: NodeJS.ReadableStream }) => {
+        uploadedBytes.push(await streamByteLength(request.file));
+        if (uploadedBytes.length === 1) {
+          await firstHeld;
+        }
+        return { text: `segment ${uploadedBytes.length}` };
+      },
+    );
+
+    const provider = new OpenAISTT({ apiKey: "sk-test" }, pino({ level: "silent" }));
+    const session = provider.createSession({ logger: pino({ level: "silent" }), language: "en" });
+    const transcripts: string[] = [];
+    session.on("transcript", (event) => {
+      if (event.isFinal) {
+        transcripts.push(event.transcript);
+      }
+    });
+
+    await session.connect();
+    session.appendPcm16(Buffer.alloc(320));
+    session.commit();
+    await vi.waitFor(() => expect(uploadedBytes).toHaveLength(1));
+
+    session.appendPcm16(Buffer.alloc(640));
+    releaseFirst();
+    await vi.waitFor(() => expect(transcripts).toEqual(["segment 1"]));
+    session.commit();
+    await vi.waitFor(() => expect(transcripts).toEqual(["segment 1", "segment 2"]));
+
+    expect(uploadedBytes[1]! - uploadedBytes[0]!).toBe(320);
   });
 });
