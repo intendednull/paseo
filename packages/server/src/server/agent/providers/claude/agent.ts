@@ -1757,6 +1757,7 @@ export class ClaudeAgentClient implements AgentClient {
     return buildClaudeFeatures({
       modelId: claudeConfig.model,
       fastModeEnabled: claudeConfig.featureValues?.fast_mode === true,
+      ultracodeEnabled: claudeConfig.featureValues?.ultracode === true,
     });
   }
 
@@ -2450,6 +2451,7 @@ class ClaudeAgentSession implements AgentSession {
     return buildClaudeFeatures({
       modelId: this.config.model,
       fastModeEnabled: this.config.featureValues?.fast_mode === true,
+      ultracodeEnabled: this.config.featureValues?.ultracode === true,
     });
   }
 
@@ -2802,6 +2804,10 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   async setFeature(featureId: string, value: unknown): Promise<void> {
+    if (featureId === "ultracode") {
+      await this.applyUltracodeFeature(Boolean(value));
+      return;
+    }
     if (featureId !== "fast_mode") {
       throw new Error(`Unknown Claude feature: ${featureId}`);
     }
@@ -2824,6 +2830,21 @@ class ClaudeAgentSession implements AgentSession {
     const activeQuery = query ?? this.query;
     if (activeQuery) {
       await activeQuery.applyFlagSettings({ fastMode: enabled });
+    }
+    this.cachedRuntimeInfo = null;
+  }
+
+  // Independent of effort: the "Ultra Code" thinking level also turns ultracode on,
+  // and the effective value is either one. New processes get it at launch.
+  private async applyUltracodeFeature(enabled: boolean): Promise<void> {
+    this.config.featureValues = {
+      ...this.config.featureValues,
+      ultracode: enabled,
+    };
+    if (this.query) {
+      await this.query.applyFlagSettings({
+        ultracode: enabled || this.config.thinkingOptionId === CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+      });
     }
     this.cachedRuntimeInfo = null;
   }
@@ -3658,7 +3679,9 @@ class ClaudeAgentSession implements AgentSession {
       this.config.providerOptions,
       this.config.toolPolicy,
     );
-    const settingsOptions = await this.buildSettingsOptions(providerOptions, { ultracode });
+    const settingsOptions = await this.buildSettingsOptions(providerOptions, {
+      ultracode: ultracode || this.config.featureValues?.ultracode === true,
+    });
     const sdkEnv = this.harnessEnvironment;
     assertClaudeModeCanRun(permissionMode, sdkEnv);
 
