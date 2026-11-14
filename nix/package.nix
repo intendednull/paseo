@@ -90,6 +90,10 @@ buildNpmPackage rec {
   buildPhase = ''
     runHook preBuild
 
+    # The root postinstall: patch-package backports from patches/. npmConfigHook installs
+    # with --ignore-scripts, so without this the build ships unpatched dependencies.
+    PATH="$PWD/node_modules/.bin:$PATH" node scripts/postinstall-patches.mjs
+
     # Rebuild only node-pty (native addon for terminal emulation). The sherpa
     # speech runtime ships prebuilt platform packages and is copied into the
     # daemon closure by scripts/trace-daemon.mjs.

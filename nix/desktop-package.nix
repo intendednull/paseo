@@ -97,6 +97,10 @@ buildNpmPackage {
   buildPhase = ''
     runHook preBuild
 
+    # The root postinstall: patch-package backports from patches/. npmConfigHook installs
+    # with --ignore-scripts, so without this the build ships unpatched dependencies.
+    PATH="$PWD/node_modules/.bin:$PATH" node scripts/postinstall-patches.mjs
+
     # Native deps (terminal emulation; libuv-linked on Linux)
     npm rebuild node-pty
 
