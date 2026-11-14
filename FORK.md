@@ -13,6 +13,12 @@ unpackaged Electron fetched React DevTools).
 (forks/paseo/patches, asar patching). Keeping them as TypeScript commits here
 makes them readable, testable with upstream's suite, and rebasable.
 
+## Notes
+
+`.fork/notes/` keeps investigation write-ups behind carried patches (e.g. the
+remote-finish analysis behind the #8575 backport, with its earlier dist-format
+backport patch for reference).
+
 ## Upstream contribution policy
 
 Contributions upstream are OFF unless the operator asks, for that change only.
