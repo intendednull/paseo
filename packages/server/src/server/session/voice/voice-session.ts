@@ -13,7 +13,11 @@ import {
   DictationStreamManager,
   type DictationStreamOutboundMessage,
 } from "../../dictation/dictation-stream-manager.js";
-import { createVoiceTurnController, type VoiceTurnController } from "./voice-turn-controller.js";
+import {
+  createVoiceTurnController,
+  isFillerOnlyTranscript,
+  type VoiceTurnController,
+} from "./voice-turn-controller.js";
 import { buildVoiceModeSystemPrompt, stripVoiceModeSystemPrompt } from "../../voice-config.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { ManagedAgent } from "../../agent/agent-manager.js";
@@ -983,8 +987,13 @@ export class VoiceSession {
       },
     });
 
-    if (!transcriptText) {
-      this.sessionLogger.debug("Empty transcription (false positive), not aborting");
+    if (!transcriptText || isFillerOnlyTranscript(transcriptText)) {
+      this.sessionLogger.info(
+        { transcriptLength: transcriptText.length },
+        "Empty or filler transcription (false positive), agent run left running",
+      );
+      // Speech detection aborted the controller; re-arm it for the agent's next speak call.
+      this.createAbortController();
       this.setPhase("idle");
       this.clearSpeechInProgress("empty transcription");
       await this.flushPendingAudioSegments("empty transcription");
@@ -993,6 +1002,13 @@ export class VoiceSession {
 
     // Has content - abort any in-progress stream now
     this.createAbortController();
+    if (this.isVoiceMode && this.voiceModeAgentId) {
+      try {
+        await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
+      } catch (error) {
+        this.sessionLogger.warn({ err: error }, "Voice interruption on transcript failed");
+      }
+    }
 
     if (result.debugRecordingPath) {
       this.emit({
@@ -1155,7 +1171,7 @@ export class VoiceSession {
     const hadActiveStream = this.host.hasActiveAgentRun(this.voiceModeAgentId);
 
     this.speechInProgress = true;
-    this.sessionLogger.debug("Voice speech detected – aborting playback and active agent run");
+    this.sessionLogger.debug("Voice speech detected – stopping playback");
 
     if (this.pendingAudioSegments.length > 0) {
       this.sessionLogger.debug(
@@ -1177,8 +1193,14 @@ export class VoiceSession {
 
     this.clearBufferTimeout();
 
+    // Stop playback on any detected speech, but leave the agent's run alone until the
+    // transcript has words (handleTranscriptionResultPayload), so background noise no
+    // longer cancels the reply's work.
     this.abortController.abort();
-    await this.handleAbort();
+    this.ttsManager.cancelPendingPlaybacks("voice speech detected");
+    if (this.processingPhase !== "transcribing") {
+      this.setPhase("idle");
+    }
 
     const latencyMs = Date.now() - chunkReceivedAt;
     this.sessionLogger.debug(

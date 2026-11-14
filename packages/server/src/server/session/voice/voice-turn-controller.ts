@@ -13,7 +13,7 @@ import type { TurnDetectionProvider } from "../../speech/turn-detection-provider
 
 const VOICE_FINAL_TRANSCRIPT_TIMEOUT_MS = 10_000;
 
-const FILLER_PARTIAL_WORDS = new Set([
+const FILLER_WORDS = new Set([
   "uh",
   "um",
   "ah",
@@ -29,7 +29,7 @@ const FILLER_PARTIAL_WORDS = new Set([
   "oh",
 ]);
 
-function isFillerOnlyPartial(transcript: string): boolean {
+export function isFillerOnlyTranscript(transcript: string): boolean {
   const tokens = transcript
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s'-]/gu, "")
@@ -38,7 +38,7 @@ function isFillerOnlyPartial(transcript: string): boolean {
   if (tokens.length === 0) {
     return true;
   }
-  return tokens.every((token) => FILLER_PARTIAL_WORDS.has(token));
+  return tokens.every((token) => FILLER_WORDS.has(token));
 }
 
 type VoiceInputState =
@@ -306,7 +306,7 @@ export function createVoiceTurnController(params: {
 
     activeTranscriptSegmentId = event.segmentId;
 
-    if (isFillerOnlyPartial(transcript)) {
+    if (isFillerOnlyTranscript(transcript)) {
       return;
     }
 
