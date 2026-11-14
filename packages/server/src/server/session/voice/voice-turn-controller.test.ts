@@ -403,6 +403,45 @@ describe("voice turn controller", () => {
     );
   });
 
+  it("keeps a pending turn when new speech starts and sends it with that speech", async () => {
+    const harness = createControllerHarness();
+
+    await harness.controller.start();
+    harness.detector.emit("speech_started");
+    await settleSerialQueue();
+    harness.detector.emit("speech_stopped");
+    await settleSerialQueue();
+    harness.sttSessions[0]?.emitCommitted({ segmentId: "segment-1", previousSegmentId: null });
+
+    harness.detector.emit("speech_started");
+    await settleSerialQueue();
+    harness.sttSessions[0]?.emitTranscript({
+      segmentId: "segment-1",
+      transcript: "first half",
+      isFinal: true,
+    });
+    await settleSerialQueue();
+    expect(harness.onFinalTranscript).not.toHaveBeenCalled();
+
+    harness.detector.emit("speech_stopped");
+    await settleSerialQueue();
+    harness.sttSessions[0]?.emitCommitted({
+      segmentId: "segment-2",
+      previousSegmentId: "segment-1",
+    });
+    harness.sttSessions[0]?.emitTranscript({
+      segmentId: "segment-2",
+      transcript: "second half",
+      isFinal: true,
+    });
+    await settleSerialQueue();
+
+    expect(harness.onFinalTranscript).toHaveBeenCalledTimes(1);
+    expect(harness.onFinalTranscript).toHaveBeenCalledWith(
+      expect.objectContaining({ segmentId: "segment-1", transcript: "first half second half" }),
+    );
+  });
+
   it("fires the finalization timeout with whatever finals arrived", async () => {
     vi.useFakeTimers();
     try {
