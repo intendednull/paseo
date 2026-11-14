@@ -15,7 +15,8 @@ npm run build:server
 npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --workspace=@getpaseo/desktop
 (cd packages/server && npx vitest run \
   src/server/speech/providers/openai src/server/session/voice \
-  src/server/agent/providers/claude/agent.test.ts)
+  src/server/agent/providers/claude/agent.test.ts \
+  src/server/connected-hosts/hosts.e2e.test.ts src/server/agent/mcp-parity.e2e.test.ts)
 (cd packages/app && npx vitest run --project unit \
   src/composer/agent-controls src/utils/workspace-agent-activity.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \
