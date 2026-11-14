@@ -59,6 +59,7 @@ export function SidebarModelProvider({
   const list = useSidebarWorkspacesList({ enabled: active });
   const showBackground = useSidebarViewStore((state) => state.showBackground);
   const groupMode = useSidebarViewStore((state) => state.groupMode);
+  const workspaceSort = useSidebarViewStore((state) => state.workspaceSort);
   const labelFilter = useSidebarViewStore((state) => state.labelFilter);
   const projectFilters = useSidebarViewStore((state) => state.projectFilters);
   const reconcileLabelFilter = useSidebarViewStore((state) => state.reconcileLabelFilter);
@@ -156,12 +157,14 @@ export function SidebarModelProvider({
       workspaceEntriesByKey: filteredWorkspaceEntriesByKey,
       projectNamesByViewKey: list.projectNamesByViewKey,
       groupMode,
+      workspaceSort,
       pinnedCollapsed,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
       t,
     }),
     [
+      workspaceSort,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
       groupMode,

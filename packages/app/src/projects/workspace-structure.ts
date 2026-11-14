@@ -30,7 +30,9 @@ interface WorkspaceStructureSession {
   workspaces: Iterable<WorkspaceDescriptor>;
 }
 
-export type WorkspaceSort = "manual" | "created" | "lastPrompt";
+// "activity" orders by agent activity, which only the client knows; here it falls back to
+// creation time and the sidebar projection re-sorts (buildSidebarProjection).
+export type WorkspaceSort = "manual" | "created" | "lastPrompt" | "activity";
 
 interface WorkspaceSortItem {
   workspaceName: string;

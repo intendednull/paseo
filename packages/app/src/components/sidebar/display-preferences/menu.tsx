@@ -240,15 +240,13 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
       },
     ];
 
-    if (preferences.grouping === "project") {
-      definitions.push({
-        id: "sort",
-        title: t("sidebar.display.sort.label"),
-        content: (
-          <SortPage preferences={preferences} automaticSortSupported={workspaceSortSupported} />
-        ),
-      });
-    }
+    definitions.push({
+      id: "sort",
+      title: t("sidebar.display.sort.label"),
+      content: (
+        <SortPage preferences={preferences} automaticSortSupported={workspaceSortSupported} />
+      ),
+    });
 
     if (showHostFilter) {
       definitions.push({
@@ -319,18 +317,18 @@ export function SidebarDisplayPreferencesMenu(): ReactElement {
           >
             {t("sidebar.display.grouping.label")}
           </MenuSubTrigger>
-          {preferences.grouping === "project" ? (
-            <MenuSubTrigger
-              id="sort"
-              value={
-                workspaceSortSupported || preferences.workspaceSort === "manual"
-                  ? t(`sidebar.display.sort.${preferences.workspaceSort}`)
-                  : undefined
-              }
-            >
-              {t("sidebar.display.sort.label")}
-            </MenuSubTrigger>
-          ) : null}
+          <MenuSubTrigger
+            id="sort"
+            value={
+              workspaceSortSupported ||
+              preferences.workspaceSort === "manual" ||
+              preferences.workspaceSort === "activity"
+                ? t(`sidebar.display.sort.${preferences.workspaceSort}`)
+                : undefined
+            }
+          >
+            {t("sidebar.display.sort.label")}
+          </MenuSubTrigger>
           <MenuSubTrigger
             id="titleSource"
             value={t(TITLE_SOURCE_LABEL_KEYS[preferences.titleSource])}
@@ -409,8 +407,12 @@ function SortPage({
   const selectManual = useCallback(() => setWorkspaceSort("manual"), [setWorkspaceSort]);
   const selectCreated = useCallback(() => setWorkspaceSort("created"), [setWorkspaceSort]);
   const selectLastPrompt = useCallback(() => setWorkspaceSort("lastPrompt"), [setWorkspaceSort]);
+  const selectActivity = useCallback(() => setWorkspaceSort("activity"), [setWorkspaceSort]);
   return (
     <>
+      <MenuItem selected={preferences.workspaceSort === "activity"} onSelect={selectActivity}>
+        {t("sidebar.display.sort.activity")}
+      </MenuItem>
       <MenuItem selected={preferences.workspaceSort === "manual"} onSelect={selectManual}>
         {t("sidebar.display.sort.manual")}
       </MenuItem>
