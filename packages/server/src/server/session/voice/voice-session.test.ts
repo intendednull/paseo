@@ -136,7 +136,7 @@ async function settle(): Promise<void> {
 }
 
 describe("VoiceSession streaming transcription", () => {
-  test("interrupts playback and the agent on speech detection without partial transcripts", async () => {
+  test("stops playback but leaves the agent running on speech detection alone", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {
         return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
@@ -158,12 +158,46 @@ describe("VoiceSession streaming transcription", () => {
         type: "voice_input_state",
         payload: { isSpeaking: true },
       });
-      expect(interrupted).toEqual([VOICE_AGENT_ID]);
+      expect(interrupted).toEqual([]);
       await playback;
     } finally {
       await voiceSession.cleanup();
       await playback.catch(() => {});
     }
+  });
+
+  test.each([
+    ["a transcript with words", "stop, do the other thing", [VOICE_AGENT_ID]],
+    ["a filler-only transcript", "Um... hmm.", []],
+  ])("on %s, interrupts the agent only if it has words", async (_label, transcript, expected) => {
+    const { voiceSession, detector, sttSession, host } = createVoiceSession();
+    const interrupted: string[] = [];
+    host.interruptAgentIfRunning = async (agentId: string) => {
+      interrupted.push(agentId);
+    };
+
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    detector.emit("speech_started");
+    await settle();
+    detector.emit("speech_stopped");
+    await settle();
+    sttSession.emitCommitted({ segmentId: "segment-1", previousSegmentId: null });
+    sttSession.emitTranscript({
+      segmentId: "segment-1",
+      transcript,
+      isFinal: true,
+      isLowConfidence: false,
+    });
+    await vi.waitFor(() =>
+      expect(host.emitted).toContainEqual(
+        expect.objectContaining({ type: "transcription_result" }),
+      ),
+    );
+    await settle();
+
+    expect(interrupted).toEqual(expected);
+    expect(host.spokenInput.length).toBe(expected.length);
+    await voiceSession.cleanup();
   });
 
   test("session abort stops later audio even when the speak tool supplies its own signal", async () => {
