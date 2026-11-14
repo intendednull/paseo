@@ -1257,6 +1257,7 @@ export const fr: TranslationResources = {
         created: "Création",
         manual: "Manuel",
         lastPrompt: "Dernier prompt",
+        activity: "Activité récente",
         updateHost: "Mettez les hôtes à jour pour trier les espaces de travail",
       },
       grouping: {

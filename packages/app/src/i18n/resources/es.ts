@@ -1265,6 +1265,7 @@ export const es: TranslationResources = {
         created: "Creación",
         manual: "Manual",
         lastPrompt: "Último prompt",
+        activity: "Actividad reciente",
         updateHost: "Actualiza los hosts para ordenar los espacios de trabajo",
       },
       grouping: {

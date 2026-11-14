@@ -55,6 +55,8 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   archiveUnpushedCommitCount: number | null;
   scripts: WorkspaceDescriptor["scripts"];
   hasRunningScripts: boolean;
+  /** Ms; the "activity" sort key: newest agent activity, else last prompt, else creation. */
+  activityAt?: number;
 }
 
 export interface SidebarProjectEntry {
@@ -170,6 +172,11 @@ export function createSidebarWorkspaceEntry(input: {
     currentBranch: normalizeCurrentBranch(input.workspace.gitRuntime?.currentBranch),
     statusBucket: effectiveStatus.status,
     statusEnteredAt: effectiveStatus.enteredAt,
+    activityAt: Math.max(
+      input.workspaceAgentActivity?.get(input.workspace.id)?.activityAt ?? 0,
+      input.workspace.lastUserMessageAt?.getTime() ?? 0,
+      input.workspace.createdAt?.getTime() ?? 0,
+    ),
     archivingAt: input.workspace.archivingAt,
     diffStat: input.workspace.diffStat,
     prHint: selectPrHintFromStatus(

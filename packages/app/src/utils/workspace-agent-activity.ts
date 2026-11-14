@@ -6,6 +6,8 @@ export interface WorkspaceAgentActivity {
   agentId: string;
   status: WorkspaceDescriptor["status"];
   enteredAt: Date | null;
+  /** Newest updatedAt, attentionTimestamp or lastUserMessageAt (ms) of any agent in the workspace. */
+  activityAt: number;
 }
 
 function workspaceAgentStatus(agent: Agent): Agent["status"] {
@@ -19,6 +21,7 @@ export function buildWorkspaceAgentActivityIndex(
 ): Map<string, WorkspaceAgentActivity> {
   const activityByWorkspaceId = new Map<string, WorkspaceAgentActivity>();
   const latestActivityAtByWorkspaceId = new Map<string, Date>();
+  const newestAgentActivityByWorkspaceId = newestAgentActivityByWorkspace(agents);
 
   for (const agent of agents.values()) {
     const parentAgent = agent.parentAgentId ? agents.get(agent.parentAgentId) : undefined;
@@ -49,16 +52,15 @@ export function buildWorkspaceAgentActivityIndex(
       agentId: agent.id,
       status,
       enteredAt,
+      activityAt: 0,
     });
   }
 
   for (const [workspaceId, activity] of activityByWorkspaceId) {
+    activity.activityAt = newestAgentActivityByWorkspaceId.get(workspaceId) ?? 0;
     const previousActivity = previous?.get(workspaceId);
-    if (
-      previousActivity?.agentId === activity.agentId &&
-      previousActivity.status === activity.status
-    ) {
-      activityByWorkspaceId.set(workspaceId, previousActivity);
+    if (previousActivity) {
+      activityByWorkspaceId.set(workspaceId, keepUnchangedStatus(previousActivity, activity));
     }
   }
 
@@ -66,6 +68,33 @@ export function buildWorkspaceAgentActivityIndex(
     return previous instanceof Map ? previous : new Map(previous);
   }
   return activityByWorkspaceId;
+}
+
+/** Newest updatedAt, attentionTimestamp or lastUserMessageAt of any non-archived, non-background agent. */
+function newestAgentActivityByWorkspace(agents: ReadonlyMap<string, Agent>): Map<string, number> {
+  const newest = new Map<string, number>();
+  for (const agent of agents.values()) {
+    if (agent.archivedAt || agent.background || !agent.workspaceId) continue;
+    const activityAt = Math.max(
+      agent.updatedAt.getTime(),
+      agent.attentionTimestamp?.getTime() ?? 0,
+      agent.lastUserMessageAt?.getTime() ?? 0,
+    );
+    if (activityAt > (newest.get(agent.workspaceId) ?? 0)) {
+      newest.set(agent.workspaceId, activityAt);
+    }
+  }
+  return newest;
+}
+
+/** An unchanged agent and status keeps its enteredAt (and identity); only activityAt moves. */
+function keepUnchangedStatus(
+  previous: WorkspaceAgentActivity,
+  next: WorkspaceAgentActivity,
+): WorkspaceAgentActivity {
+  if (previous.agentId !== next.agentId || previous.status !== next.status) return next;
+  if (previous.activityAt === next.activityAt) return previous;
+  return { ...previous, activityAt: next.activityAt };
 }
 
 function areWorkspaceAgentActivityIndexesIdentical(

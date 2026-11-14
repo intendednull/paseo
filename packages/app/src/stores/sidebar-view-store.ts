@@ -92,7 +92,7 @@ const SidebarLabelFilterSchema = z.object({
   labels: z.array(z.string()),
 });
 const SidebarViewPersistedStateSchema = z.strictObject({
-  workspaceSort: z.enum(["manual", "created", "lastPrompt"]).optional(),
+  workspaceSort: z.enum(["manual", "created", "lastPrompt", "activity"]).optional(),
   showBackground: z.boolean().optional(),
   groupMode: PersistedSidebarGroupModeSchema.optional(),
   hostFilters: z.array(z.string()).optional(),
@@ -196,7 +196,7 @@ export const useSidebarViewStore = create<SidebarViewStoreState>()(
     (set) => ({
       showBackground: false,
       groupMode: "project",
-      workspaceSort: "created",
+      workspaceSort: "activity",
       hostFilters: [],
       projectFilters: [],
       labelFilter: emptyLabelFilter(),

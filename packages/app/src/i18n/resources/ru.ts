@@ -1247,6 +1247,7 @@ export const ru: TranslationResources = {
         created: "Дата создания",
         manual: "Вручную",
         lastPrompt: "Последний запрос",
+        activity: "Недавняя активность",
         updateHost: "Обновите хосты для сортировки рабочих пространств",
       },
       grouping: {
