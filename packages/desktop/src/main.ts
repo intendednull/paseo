@@ -782,8 +782,12 @@ async function createWindow(
   });
 
   if (!app.isPackaged) {
-    const { loadReactDevTools } = await import("./features/react-devtools.js");
-    await loadReactDevTools();
+    // An unpackaged Electron is also how distro builds (nix/desktop-package.nix) run, so
+    // fetching React DevTools from the Chrome Web Store is opt-in, not implied by dev mode.
+    if (process.env.PASEO_REACT_DEVTOOLS === "1") {
+      const { loadReactDevTools } = await import("./features/react-devtools.js");
+      await loadReactDevTools();
+    }
     const initialUrl = options.initialRoute
       ? new URL(options.initialRoute, `${DEV_SERVER_URL}/`).toString()
       : DEV_SERVER_URL;
