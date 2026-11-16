@@ -27,6 +27,8 @@ import { density, densityIconBox, densityIconProps } from "@/styles/density";
 import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { withUnistyles } from "react-native-unistyles";
 import {
+  CalendarClock,
+  CalendarDays,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -94,6 +96,8 @@ const runningGroupIconProps = densityIconProps("sm", (theme) => ({
   color: getStatusDotColor({ theme, bucket: "running" }) ?? undefined,
 }));
 
+const ThemedCalendarClock = withUnistyles(CalendarClock);
+const ThemedCalendarDays = withUnistyles(CalendarDays);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedCircleAlert = withUnistyles(CircleAlert);
@@ -512,6 +516,13 @@ function StatusGroupLeadingVisual({
   showChevron: boolean;
 }) {
   if (!showChevron) {
+    if (leading.kind === "date") {
+      return leading.recent ? (
+        <ThemedCalendarClock uniProps={mutedGroupIconProps} />
+      ) : (
+        <ThemedCalendarDays uniProps={mutedGroupIconProps} />
+      );
+    }
     return <StatusGroupIcon bucket={leading.bucket} />;
   }
   if (collapsed) {

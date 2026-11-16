@@ -1272,6 +1272,9 @@ export const es: TranslationResources = {
         label: "Agrupación",
         project: "Proyecto",
         status: "Estado",
+        date: "Fecha",
+        lastSevenDays: "Últimos 7 días",
+        olderThanSevenDays: "Hace más de 7 días",
         labels: "Etiquetas",
       },
       titleSource: {

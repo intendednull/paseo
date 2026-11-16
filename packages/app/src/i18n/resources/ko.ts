@@ -1242,6 +1242,9 @@ export const ko: TranslationResources = {
         label: "그룹화",
         project: "프로젝트",
         status: "상태",
+        date: "날짜",
+        lastSevenDays: "최근 7일",
+        olderThanSevenDays: "7일 이전",
         labels: "레이블",
       },
       titleSource: {

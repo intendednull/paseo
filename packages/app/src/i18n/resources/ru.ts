@@ -1254,6 +1254,9 @@ export const ru: TranslationResources = {
         label: "Группировка",
         project: "Проект",
         status: "Статус",
+        date: "Дата",
+        lastSevenDays: "Последние 7 дней",
+        olderThanSevenDays: "Старше 7 дней",
         labels: "Метки",
       },
       titleSource: {

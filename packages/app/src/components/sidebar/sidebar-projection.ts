@@ -45,6 +45,8 @@ export interface SidebarProjectionInput {
   projectNamesByViewKey: Map<string, string>;
   groupMode: SidebarGroupMode;
   workspaceSort?: WorkspaceSort;
+  /** Ms; the clock the "date" grouping cuts against (defaults to Date.now()). */
+  now?: number;
   pinnedCollapsed: boolean;
   collapsedProjectKeys: ReadonlySet<string>;
   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
@@ -95,7 +97,10 @@ export function buildSidebarProjection(rawInput: SidebarProjectionInput): Sideba
   };
 }
 
-/** Project mode keeps its project headers and groups nothing; status mode groups the rows. */
+/**
+ * Project mode keeps its project headers and groups nothing; status mode groups the rows by
+ * state, date mode into "Last 7 days" and "Older than 7 days".
+ */
 function buildWorkspaceGroups(
   input: SidebarProjectionInput,
   unpinnedWorkspaces: SidebarWorkspaceEntry[],
@@ -111,6 +116,71 @@ function buildWorkspaceGroups(
       }
       return statusWorkspaceGroups(groups);
     }
+    case "date":
+      return dateWorkspaceGroups(input, unpinnedWorkspaces);
+  }
+}
+
+const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Two sections cut on `activityAt`, the activity sort's key, so a workspace is recent exactly
+ * when its activity is. Rows keep the chosen sort across projects; manual keeps project order
+ * with each project's manual order.
+ */
+function dateWorkspaceGroups(
+  input: SidebarProjectionInput,
+  unpinnedWorkspaces: SidebarWorkspaceEntry[],
+): SidebarWorkspaceGroup[] {
+  const cutoff = (input.now ?? Date.now()) - RECENT_WINDOW_MS;
+  const rows = orderAcrossProjects(input, unpinnedWorkspaces);
+  const sections = [
+    { recent: true, key: "date:recent", label: input.t("sidebar.display.grouping.lastSevenDays") },
+    {
+      recent: false,
+      key: "date:older",
+      label: input.t("sidebar.display.grouping.olderThanSevenDays"),
+    },
+  ];
+  return sections
+    .map((section) => ({
+      key: section.key,
+      label: section.label,
+      rows: rows.filter((row) => (row.activityAt ?? 0) >= cutoff === section.recent),
+      leading: { kind: "date" as const, recent: section.recent },
+    }))
+    .filter((group) => group.rows.length > 0);
+}
+
+function orderAcrossProjects(
+  input: SidebarProjectionInput,
+  workspaces: SidebarWorkspaceEntry[],
+): SidebarWorkspaceEntry[] {
+  const position = new Map<string, number>();
+  for (const project of input.projects) {
+    for (const placement of project.workspaces) position.set(placement.workspaceKey, position.size);
+  }
+  const byProjectOrder = (left: SidebarWorkspaceEntry, right: SidebarWorkspaceEntry) =>
+    (position.get(left.workspaceKey) ?? Infinity) - (position.get(right.workspaceKey) ?? Infinity);
+  const key = sortKey(input.workspaceSort);
+  return [...workspaces].sort(
+    (left, right) => (key ? key(right) - key(left) : 0) || byProjectOrder(left, right),
+  );
+}
+
+function sortKey(
+  sort: WorkspaceSort | undefined,
+): ((entry: SidebarWorkspaceEntry) => number) | null {
+  switch (sort) {
+    case "activity":
+      return (entry) => entry.activityAt ?? 0;
+    case "created":
+      return (entry) => entry.createdAtMs ?? 0;
+    case "lastPrompt":
+      return (entry) => entry.lastPromptAtMs ?? entry.createdAtMs ?? 0;
+    case "manual":
+    case undefined:
+      return null;
   }
 }
 

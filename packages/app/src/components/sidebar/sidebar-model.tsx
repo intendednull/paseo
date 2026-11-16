@@ -1,5 +1,12 @@
 import { useTranslation } from "react-i18next";
-import React, { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   useSidebarWorkspacesList,
   type SidebarProjectEntry,
@@ -48,6 +55,21 @@ interface SidebarModel extends SidebarWorkspacesListResult {
 
 const SidebarModelContext = createContext<SidebarModel | null>(null);
 
+// How often the "date" grouping re-reads the clock, so an open sidebar moves a workspace to
+// "Older than 7 days" without waiting for unrelated data to change.
+const DATE_GROUPING_CLOCK_MS = 10 * 60 * 1000;
+
+function useDateGroupingNow(enabled: boolean): number | undefined {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), DATE_GROUPING_CLOCK_MS);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return enabled ? now : undefined;
+}
+
 export function SidebarModelProvider({
   active,
   keyboardNavigationActive = false,
@@ -63,6 +85,7 @@ export function SidebarModelProvider({
   const showBackground = useSidebarViewStore((state) => state.showBackground);
   const groupMode = useSidebarViewStore((state) => state.groupMode);
   const workspaceSort = useSidebarViewStore((state) => state.workspaceSort);
+  const now = useDateGroupingNow(groupMode === "date");
   const labelFilter = useSidebarViewStore((state) => state.labelFilter);
   const projectFilters = useSidebarViewStore((state) => state.projectFilters);
   const reconcileLabelFilter = useSidebarViewStore((state) => state.reconcileLabelFilter);
@@ -162,6 +185,7 @@ export function SidebarModelProvider({
       projectNamesByViewKey: list.projectNamesByViewKey,
       groupMode,
       workspaceSort,
+      now,
       pinnedCollapsed,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
@@ -169,6 +193,7 @@ export function SidebarModelProvider({
     }),
     [
       workspaceSort,
+      now,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
       groupMode,
