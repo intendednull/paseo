@@ -28,6 +28,24 @@ Contributions upstream are OFF unless the operator asks, for that change only.
 `git log --reverse v0.15.4..nixos` — every commit carries `Upstream-Status:`
 (backport | submitted | closed (<reason>) | unsent | local) and `Drop-When:`.
 
+## Drop-When at a glance
+
+The commit trailers are authoritative; this is the summary.
+
+| commit                                                   | drop when                                                         |
+| -------------------------------------------------------- | ----------------------------------------------------------------- |
+| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice             |
+| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting                        |
+| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start           |
+| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                                  |
+| feat(claude): per-session ultracode toggle               | upstream ships ultracode independent of the thinking level        |
+| feat(app): ultracode toggle on/off colour                | the toggle is dropped, or upstream colours unknown active toggles |
+| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                                   |
+| fix(server): #8575 backport                              | rebased onto >= v0.16.0                                           |
+| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools           |
+| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                            |
+| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode                   |
+
 ## Branches
 
 - `nixos`: base tag plus the patch queue; what the flake builds.
