@@ -1233,6 +1233,9 @@ export const ar: TranslationResources = {
         label: "التجميع",
         project: "المشروع",
         status: "الحالة",
+        date: "التاريخ",
+        lastSevenDays: "آخر 7 أيام",
+        olderThanSevenDays: "أقدم من 7 أيام",
         labels: "التسميات",
       },
       titleSource: {

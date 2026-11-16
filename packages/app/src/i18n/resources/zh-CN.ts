@@ -1225,6 +1225,9 @@ export const zhCN: TranslationResources = {
         label: "分组",
         project: "项目",
         status: "状态",
+        date: "日期",
+        lastSevenDays: "最近 7 天",
+        olderThanSevenDays: "7 天以前",
         labels: "标签",
       },
       titleSource: {

@@ -1259,6 +1259,9 @@ export const ptBR: TranslationResources = {
         label: "Agrupamento",
         project: "Projeto",
         status: "Status",
+        date: "Data",
+        lastSevenDays: "Últimos 7 dias",
+        olderThanSevenDays: "Mais de 7 dias atrás",
         labels: "Etiquetas",
       },
       titleSource: {
