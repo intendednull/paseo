@@ -1195,6 +1195,9 @@ export const ja: TranslationResources = {
         label: "グループ化",
         project: "プロジェクト",
         status: "ステータス",
+        date: "日付",
+        lastSevenDays: "過去7日間",
+        olderThanSevenDays: "7日以上前",
         labels: "ラベル",
       },
       titleSource: {

@@ -206,3 +206,71 @@ describe("buildSidebarProjection", () => {
     ]);
   });
 });
+
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = 100 * DAY;
+// Two projects; "b-old" has the newest creation time but no recent activity.
+function dateInput(workspaceSort: "activity" | "created" | "manual") {
+  const a1 = makeWorkspace("a-recent", "done", [], "project");
+  const a2 = makeWorkspace("a-old", "attention", [], "project");
+  const b1 = makeWorkspace("b-recent", "running", [], "other-project");
+  const b2 = makeWorkspace("b-old", "done", [], "other-project");
+  a1.entry.activityAt = NOW - 1 * DAY;
+  a1.entry.createdAtMs = 10 * DAY;
+  a2.entry.activityAt = NOW - 30 * DAY;
+  a2.entry.createdAtMs = 20 * DAY;
+  b1.entry.activityAt = NOW - 2 * DAY;
+  b1.entry.createdAtMs = 30 * DAY;
+  b2.entry.activityAt = NOW - 7 * DAY - 1;
+  b2.entry.createdAtMs = 40 * DAY;
+  const entries = [a1, a2, b1, b2].map((w) => w.entry);
+  return {
+    ...projectionInput({ groupMode: "status" }),
+    groupMode: "date" as const,
+    workspaceSort,
+    now: NOW,
+    projects: [
+      makeProject([a2.placement, a1.placement]),
+      makeProject([b2.placement, b1.placement], "other-project"),
+    ],
+    pinnedKeys: { pinnedWorkspaceKeys: [], pinnedAtByKey: {} },
+    workspaceEntriesByKey: new Map(entries.map((e) => [e.workspaceKey, e])),
+  };
+}
+const sections = (input: ReturnType<typeof dateInput>) =>
+  buildSidebarProjection(input).workspaceGroups.map((group) => [
+    group.label,
+    group.rows.map((row) => row.workspaceId),
+  ]);
+
+describe("buildSidebarProjection date grouping", () => {
+  it("splits every status into Last 7 days and Older than 7 days by activity", () => {
+    expect(sections(dateInput("activity"))).toEqual([
+      ["Last 7 days", ["a-recent", "b-recent"]],
+      ["Older than 7 days", ["b-old", "a-old"]],
+    ]);
+  });
+
+  it("orders each section by the chosen sort across projects", () => {
+    expect(sections(dateInput("created"))).toEqual([
+      ["Last 7 days", ["b-recent", "a-recent"]],
+      ["Older than 7 days", ["b-old", "a-old"]],
+    ]);
+    expect(sections(dateInput("manual"))).toEqual([
+      ["Last 7 days", ["a-recent", "b-recent"]],
+      ["Older than 7 days", ["a-old", "b-old"]],
+    ]);
+  });
+
+  it("drops an empty section and numbers rows in section order", () => {
+    const input = dateInput("activity");
+    const projection = buildSidebarProjection({ ...input, now: 10 * DAY });
+    expect(projection.workspaceGroups.map((group) => group.key)).toEqual(["date:recent"]);
+    expect(projection.shortcutModel.shortcutTargets.map((t) => t.workspaceId)).toEqual([
+      "a-recent",
+      "b-recent",
+      "b-old",
+      "a-old",
+    ]);
+  });
+});

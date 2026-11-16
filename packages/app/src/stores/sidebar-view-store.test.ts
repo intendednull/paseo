@@ -304,3 +304,10 @@ it("defaults to Created and persists the Last prompt choice across migration", (
 it("retains the manual sorting preference on reload", () => {
   expect(migrateSidebarViewState({ workspaceSort: "manual" }).workspaceSort).toBe("manual");
 });
+
+it("persists the Date grouping across reloads", () => {
+  expect(migrateSidebarViewState({ groupMode: "date", workspaceSort: "activity" })).toMatchObject({
+    groupMode: "date",
+    workspaceSort: "activity",
+  });
+});

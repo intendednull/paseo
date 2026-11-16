@@ -1190,6 +1190,9 @@ export const en = {
         label: "Grouping",
         project: "Project",
         status: "Status",
+        date: "Date",
+        lastSevenDays: "Last 7 days",
+        olderThanSevenDays: "Older than 7 days",
         labels: "Labels",
       },
       titleSource: {

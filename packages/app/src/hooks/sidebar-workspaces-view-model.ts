@@ -57,6 +57,9 @@ export interface SidebarWorkspaceEntry extends SidebarStatusWorkspacePlacement {
   hasRunningScripts: boolean;
   /** Ms; the "activity" sort key: newest agent activity, else last prompt, else creation. */
   activityAt?: number;
+  /** Ms; the "created" and "lastPrompt" sort keys, for orders that span projects. */
+  createdAtMs?: number;
+  lastPromptAtMs?: number;
 }
 
 export interface SidebarProjectEntry {
@@ -177,6 +180,8 @@ export function createSidebarWorkspaceEntry(input: {
       input.workspace.lastUserMessageAt?.getTime() ?? 0,
       input.workspace.createdAt?.getTime() ?? 0,
     ),
+    createdAtMs: input.workspace.createdAt?.getTime(),
+    lastPromptAtMs: input.workspace.lastUserMessageAt?.getTime(),
     archivingAt: input.workspace.archivingAt,
     diffStat: input.workspace.diffStat,
     prHint: selectPrHintFromStatus(
