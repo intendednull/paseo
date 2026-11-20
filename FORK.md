@@ -17,7 +17,8 @@ makes them readable, testable with upstream's suite, and rebasable.
 
 `.fork/notes/` keeps investigation write-ups behind carried patches (e.g. the
 remote-finish analysis behind the #8575 backport, with its earlier dist-format
-backport patch for reference).
+backport patch for reference). The backport itself was dropped at v0.17.0-beta.1
+(upstream shipped #8575 in v0.16.0); the notes stay as history.
 
 ## Upstream contribution policy
 
@@ -25,26 +26,25 @@ Contributions upstream are OFF unless the operator asks, for that change only.
 
 ## Queue
 
-`git log --reverse v0.15.4..nixos` — every commit carries `Upstream-Status:`
+`git log --reverse $(cat .fork/base)..nixos` — `.fork/base` names the upstream tag the
+queue sits on. Every commit carries `Upstream-Status:`
 (backport | submitted | closed (<reason>) | unsent | local) and `Drop-When:`.
 
 ## Drop-When at a glance
 
 The commit trailers are authoritative; this is the summary.
 
-| commit                                                   | drop when                                                         |
-| -------------------------------------------------------- | ----------------------------------------------------------------- |
-| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice             |
-| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting                        |
-| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start           |
-| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                                  |
-| feat(claude): per-session ultracode toggle               | upstream ships ultracode independent of the thinking level        |
-| feat(app): ultracode toggle on/off colour                | the toggle is dropped, or upstream colours unknown active toggles |
-| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                                   |
-| fix(server): #8575 backport                              | rebased onto >= v0.16.0                                           |
-| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools           |
-| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                            |
-| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode                   |
+| commit                                                   | drop when                                               |
+| -------------------------------------------------------- | ------------------------------------------------------- |
+| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice   |
+| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting              |
+| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start |
+| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                        |
+| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                         |
+| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools |
+| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                  |
+| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode         |
+| fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json   |
 
 ## Branches
 
@@ -59,10 +59,27 @@ only `git push`. `gh repo set-default intendednull/paseo` keeps `gh` off the ups
 
 ## Updating to a new upstream tag
 
-1. `git fetch upstream --tags`, then `git rebase --onto <new-tag> <old-tag> nixos`;
-   drop any commit whose `Drop-When:` has happened (e.g. the #8575 backport at >= v0.16.0).
-2. `.fork/gate`.
-3. Only if the queue changes `package-lock.json`: `scripts/update-nix.sh` (upstream's
-   release commits keep `nix/npm-deps.hash` current otherwise).
-4. In a ~/nixos worktree: `nix flake lock --update-input paseo-src`, then
-   `nix build .#paseo-src .#paseo-src-desktop` and the forks/paseo/test checks.
+Upstream tags each sit on their own release branch: the old tag is usually not an
+ancestor of the new one. Replaying `<old-tag>..nixos` still works.
+
+1. `git fetch upstream --tags`. This clone is `blob:none`: check the new tag out in a
+   scratch worktree (`git worktree add --detach /tmp/paseo-<tag> <tag>`) before grepping
+   it, or `git grep <tag>` fetches blobs one at a time.
+2. Check every commit's `Drop-When:` against the release notes and the new tag's source.
+3. In that worktree, `git switch -c bump/<tag>` and cherry-pick the kept commits
+   (`git log --reverse --format=%h $(cat .fork/base)..nixos`). `nixos` stays on the
+   current pin until the gate passes.
+4. Write the tag into `.fork/base`, drop the dropped commits' paths from `.fork/gate`,
+   and update the table above.
+5. `npm ci --ignore-scripts`, `node scripts/postinstall-patches.mjs`, then `.fork/gate`.
+6. Check `nix/npm-deps.hash`: upstream's hash bot runs on main, not on `release/*`,
+   so a release commit that touches `package-lock.json` after the bot's last commit
+   leaves it stale (v0.17.0-beta.1). Compare
+   `git log -1 --format=%ci <tag> -- nix/npm-deps.hash` with the same for
+   `package-lock.json`. If the hash is older, or the queue changes the lock, refresh
+   it (the npm-deps FOD's "got" hash, or `scripts/update-nix.sh`) in a
+   `fix(nix): refresh npm-deps.hash` commit.
+7. Move `nixos` to the branch, tag `pin/<date>-<short8>`, push `nixos` with
+   `--force-with-lease=nixos:<old pin sha>` and the tag.
+8. In a ~/nixos worktree: set the `paseo-src` rev, `nix flake lock --update-input paseo-src`,
+   then `nix build .#paseo-src .#paseo-src-desktop` and the forks/paseo/test checks.
