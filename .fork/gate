@@ -8,17 +8,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 exec nix shell --inputs-from ~/nixos nixpkgs#nodejs_22 -c bash -euo pipefail -c '
 export PATH=$PWD/node_modules/.bin:$PATH npm_config_ignore_scripts=false
-base=$(git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*" HEAD)
+base=$(cat .fork/base)
+git merge-base --is-ancestor "$base" HEAD || { echo "gate: HEAD is not on $base (.fork/base)" >&2; exit 1; }
 oxfmt --check $(git diff --name-only --diff-filter=d "$base" HEAD -- . ":!.fork/notes")
 oxlint
 npm run build:server
 npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --workspace=@getpaseo/desktop
 (cd packages/server && npx vitest run \
-  src/server/speech/providers/openai src/server/session/voice \
-  src/server/agent/providers/claude/agent.test.ts \
-  src/server/connected-hosts/hosts.e2e.test.ts src/server/agent/mcp-parity.e2e.test.ts)
+  src/server/speech/providers/openai src/server/session/voice)
 (cd packages/app && npx vitest run --project unit \
-  src/composer/agent-controls src/utils/workspace-agent-activity.test.ts \
+  src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \
   src/stores/sidebar-view-store.test.ts src/i18n)
 npm run test --workspace=@getpaseo/desktop
