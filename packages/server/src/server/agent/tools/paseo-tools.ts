@@ -17,7 +17,12 @@ import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
 import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
-import type { AgentManager, ManagedAgent } from "../agent-manager.js";
+import {
+  AgentCompactionRefusedError,
+  AgentCompactionUnsupportedError,
+  type AgentManager,
+  type ManagedAgent,
+} from "../agent-manager.js";
 import {
   ActiveTurnBehaviorSchema,
   AgentActiveTurnBehaviorSchema,
@@ -2114,6 +2119,75 @@ function createToolCatalog(
         structuredContent: validJson,
       };
       return response;
+    },
+  );
+
+  registerTool(
+    "compact_agent",
+    {
+      title: "Compact agent",
+      description:
+        "Compact an idle agent's conversation context to reduce context window usage. Refuses when the target is mid-turn or waiting on permissions, and reports context size before and after.",
+      inputSchema: {
+        agentId: z.string(),
+        instructions: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Optional focus instructions for the compaction summary."),
+      },
+      outputSchema: {
+        success: z.boolean(),
+        agentId: z.string(),
+        provider: z.string(),
+        contextTokensBefore: z.number().nullable(),
+        contextTokensAfter: z.number().nullable(),
+        contextWindowMaxTokens: z.number().nullable(),
+        status: AgentStatusEnum,
+      },
+    },
+    async ({ agentId, instructions }) => {
+      const isProtected = (targetId: string): boolean => {
+        if (options.finishSubscriptions) {
+          try {
+            if (options.finishSubscriptions().hasPendingForCaller(targetId)) return true;
+          } catch {
+            // Standalone tool catalogs may not wire finish subscriptions.
+          }
+        }
+        if (options.agentMessages) {
+          try {
+            if (options.agentMessages().hasPending(targetId)) return true;
+          } catch {
+            // Agent message delivery may not be active yet.
+          }
+        }
+        return false;
+      };
+      try {
+        const result = await agentManager.compactAgent(agentId, {
+          instructions,
+          trigger: "manual",
+          isProtected,
+        });
+        return {
+          content: [],
+          structuredContent: ensureValidJson({
+            success: true,
+            ...result,
+          }),
+        };
+      } catch (error) {
+        if (
+          error instanceof AgentNotFoundError ||
+          error instanceof AgentCompactionRefusedError ||
+          error instanceof AgentCompactionUnsupportedError
+        ) {
+          throw new PaseoToolInputError(error.message);
+        }
+        throw error;
+      }
     },
   );
 

@@ -206,11 +206,24 @@ export type AgentPromptContentBlock =
 
 export type AgentPromptInput = string | AgentPromptContentBlock[];
 
+export class AgentCompactionAdmitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentCompactionAdmitError";
+  }
+}
+
 export interface AgentRunOptions {
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
   clientMessageId?: string;
+  /**
+   * Optional synchronous admission gate re-checked by providers that support
+   * compaction after every async setup step right before dispatching the prompt.
+   * Returning false aborts turn start cleanly with `AgentCompactionAdmitError`.
+   */
+  admitBeforeDispatch?: () => boolean;
 }
 
 export interface AgentSteerOptions extends AgentRunOptions {
@@ -771,6 +784,11 @@ export interface AgentSession {
   canStopRuntime?(): Promise<boolean>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
+  /**
+   * Whether this session supports programmatic context compaction (`compact_agent`
+   * and idle auto-compaction). When omitted, compaction is unsupported.
+   */
+  supportsCompaction?(): Promise<boolean> | boolean;
   listCommands?(): Promise<AgentSlashCommand[]>;
   /** A returned model is the effective selection committed by this mutation.
    * Returning void means the requested selection was accepted. No status read is required. */

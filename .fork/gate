@@ -15,7 +15,8 @@ oxlint
 npm run build:server
 npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --workspace=@getpaseo/desktop
 (cd packages/server && npx vitest run \
-  src/server/speech/providers/openai src/server/session/voice)
+  src/server/speech/providers/openai src/server/session/voice \
+  src/server/agent/agent-compact.test.ts)
 (cd packages/app && npx vitest run --project unit \
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \

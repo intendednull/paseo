@@ -155,6 +155,14 @@ export class AgentStorage {
     await this.load();
   }
 
+  isLoaded(): boolean {
+    return this.loaded;
+  }
+
+  getCached(agentId: string): StoredAgentRecord | null {
+    return this.cache.get(agentId) ?? null;
+  }
+
   async listAll(): Promise<StoredAgentRecord[]> {
     await this.load();
     return Array.from(this.cache.values());
