@@ -183,6 +183,41 @@ const AgentMetadataGenerationSchema = z
   })
   .strict();
 
+const IdleCompactionProviderConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    idleMinutes: z
+      .number()
+      .positive()
+      .max(24 * 60)
+      .optional(),
+    maxIdleMinutes: z
+      .number()
+      .positive()
+      .max(24 * 60)
+      .optional(),
+    minContextTokens: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const IdleCompactionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    idleMinutes: z
+      .number()
+      .positive()
+      .max(24 * 60)
+      .optional(),
+    maxIdleMinutes: z
+      .number()
+      .positive()
+      .max(24 * 60)
+      .optional(),
+    minContextTokens: z.number().int().positive().optional(),
+    providers: z.record(z.string().min(1), IdleCompactionProviderConfigSchema).optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -370,6 +405,7 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         idleRuntimeCleanup: z.boolean().optional(),
+        idleCompaction: IdleCompactionConfigSchema.optional(),
         resumeOnStartup: z.boolean().optional(),
         resumePrompt: z.string().optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),

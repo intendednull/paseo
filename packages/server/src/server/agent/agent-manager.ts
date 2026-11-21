@@ -2,6 +2,10 @@ import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agen
 import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
 import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
+import {
+  formatIdleCompactionTimelineMessage,
+  type IdleCompactionCandidate,
+} from "./idle-compaction/index.js";
 import { AgentNotFoundError, ensureAgentLoaded } from "./agent-loading.js";
 import { AgentTurnBusyError, AgentTurnChangedError } from "./agent-prompt.js";
 import {
@@ -2311,6 +2315,80 @@ export class AgentManager {
             );
           } finally {
             this.collectingRuntimes.delete(agent.id);
+          }
+        },
+      });
+    }
+    return candidates;
+  }
+
+  /** Capture live runtime capabilities for idle auto-compaction before prompt cache expiry. */
+  getIdleCompactionCandidates(): IdleCompactionCandidate[] {
+    if (this.registry && !this.registry.isLoaded()) {
+      void this.registry.initialize().catch(() => undefined);
+    }
+    const candidates: IdleCompactionCandidate[] = [];
+    for (const agent of this.agents.values()) {
+      const updatedAt = agent.updatedAt;
+      let identity = this.runtimeCleanupIdentities.get(agent.session);
+      if (!identity) {
+        identity = Object.freeze({ openedAt: Date.now() });
+        this.runtimeCleanupIdentities.set(agent.session, identity);
+      }
+      const isEligible = () =>
+        this.agents.get(agent.id) === agent &&
+        agent.updatedAt === updatedAt &&
+        !this.collectingRuntimes.has(agent.id) &&
+        !this.hasRunningBackgroundWork(agent.id) &&
+        this.runtimeHasNoPendingWork(agent, {
+          allowRunToken:
+            this.compactionAdmitRun?.agentId === agent.id
+              ? this.compactionAdmitRun.token
+              : undefined,
+        });
+      candidates.push({
+        identity,
+        agentId: agent.id,
+        parentAgentId: getParentAgentIdFromLabels(agent.labels) ?? undefined,
+        provider: agent.provider,
+        sessionId: agent.persistence?.sessionId ?? null,
+        lastActivityAt: updatedAt.getTime(),
+        contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
+        isEligible,
+        hasLiveDescendant: () => this.findLiveDescendantBlockerSync(agent) !== null,
+        supportsCompaction:
+          agent.provider === "claude"
+            ? agent.session.supportsCompaction?.bind(agent.session)
+            : () => false,
+        canStopRuntime: agent.session.canStopRuntime?.bind(agent.session),
+        compactIfEligible: async (revalidate) => {
+          try {
+            const result = await this.compactAgent(agent.id, {
+              trigger: "auto",
+              admit: () => isEligible() && revalidate(),
+            });
+            if (this.agents.get(agent.id) === agent) {
+              await this.appendTimelineItem(agent.id, {
+                type: "notification",
+                level: "info",
+                message: formatIdleCompactionTimelineMessage(result),
+              });
+            }
+            const current = this.agents.get(agent.id) ?? agent;
+            return {
+              agentId: result.agentId,
+              provider: result.provider,
+              sessionId: current.persistence?.sessionId ?? null,
+              contextTokensBefore: result.contextTokensBefore,
+              contextTokensAfter: result.contextTokensAfter,
+              contextWindowMaxTokens: result.contextWindowMaxTokens,
+              updatedAtAfter: current.updatedAt.getTime(),
+            };
+          } catch (error) {
+            if (error instanceof AgentCompactionRefusedError) {
+              return null;
+            }
+            throw error;
           }
         },
       });

@@ -38,6 +38,7 @@ interface SupportedMutableConfigPatch {
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   idleRuntimeCleanup?: boolean;
+  idleCompaction?: MutableDaemonConfig["idleCompaction"];
   resumeOnStartup?: boolean;
   resumePrompt?: string;
   appendSystemPrompt?: string;
@@ -261,6 +262,7 @@ const RELOADABLE_PATHS = [
   "daemon.agentProfiles",
   "app.baseUrl",
   "agents.idleRuntimeCleanup",
+  "agents.idleCompaction",
   "agents.resumeOnStartup",
   "agents.resumePrompt",
   "agents.providers",
@@ -289,6 +291,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["daemon.agentProfiles", "agentProfiles"],
   ["app.baseUrl", "app.baseUrl"],
   ["agents.idleRuntimeCleanup", "idleRuntimeCleanup"],
+  ["agents.idleCompaction", "idleCompaction"],
   ["agents.resumeOnStartup", "resumeOnStartup"],
   ["agents.resumePrompt", "resumePrompt"],
   ["agents.providers", "providers"],
@@ -345,9 +348,21 @@ function pickRelayPatch(
   return Object.keys(picked).length > 0 ? { relay: picked } : {};
 }
 
+function pickAgentLifecyclePatch(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
+  return {
+    ...(patch.resumeOnStartup !== undefined ? { resumeOnStartup: patch.resumeOnStartup } : {}),
+    ...(patch.resumePrompt !== undefined ? { resumePrompt: patch.resumePrompt } : {}),
+    ...(patch.idleRuntimeCleanup !== undefined
+      ? { idleRuntimeCleanup: patch.idleRuntimeCleanup }
+      : {}),
+    ...(patch.idleCompaction !== undefined ? { idleCompaction: patch.idleCompaction } : {}),
+  };
+}
+
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...pickRelayPatch(patch.relay),
+    ...pickAgentLifecyclePatch(patch),
     usage: patch.usage,
     ...(patch.mcp?.injectIntoAgents !== undefined
       ? { mcp: { injectIntoAgents: patch.mcp.injectIntoAgents } }
@@ -365,11 +380,6 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
       : {}),
     ...(patch.enableTerminalAgentHooks !== undefined
       ? { enableTerminalAgentHooks: patch.enableTerminalAgentHooks }
-      : {}),
-    ...(patch.resumeOnStartup !== undefined ? { resumeOnStartup: patch.resumeOnStartup } : {}),
-    ...(patch.resumePrompt !== undefined ? { resumePrompt: patch.resumePrompt } : {}),
-    ...(patch.idleRuntimeCleanup !== undefined
-      ? { idleRuntimeCleanup: patch.idleRuntimeCleanup }
       : {}),
     ...(patch.appendSystemPrompt !== undefined
       ? { appendSystemPrompt: patch.appendSystemPrompt }
@@ -795,19 +805,45 @@ function mergeMutablePatchIntoPersistedConfig(params: {
   } as PersistedConfig;
 }
 
+function mergeIdleCompactionPatch(
+  existing: NonNullable<PersistedConfig["agents"]>["idleCompaction"],
+  patch: NonNullable<SupportedMutableConfigPatch["idleCompaction"]>,
+): NonNullable<PersistedConfig["agents"]>["idleCompaction"] {
+  const mergedProviders =
+    existing?.providers || patch.providers
+      ? deepMerge(
+          (existing?.providers ?? {}) as Record<string, unknown>,
+          (patch.providers ?? {}) as Record<string, unknown>,
+        )
+      : undefined;
+  return {
+    ...existing,
+    ...patch,
+    ...(mergedProviders !== undefined ? { providers: mergedProviders } : {}),
+  } as NonNullable<PersistedConfig["agents"]>["idleCompaction"];
+}
+
+function hasMutableAgentPatch(
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+  removeProviders: readonly string[],
+): boolean {
+  return (
+    patch.providers !== undefined ||
+    patch.metadataGeneration !== undefined ||
+    patch.skills !== undefined ||
+    hasRestartRecoveryPatch(patch) ||
+    patch.idleRuntimeCleanup !== undefined ||
+    patch.idleCompaction !== undefined ||
+    removeProviders.length > 0
+  );
+}
+
 function mergeMutableAgentPatch(
   persistedAgents: PersistedConfig["agents"],
   patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
   removeProviders: readonly string[],
 ): PersistedConfig["agents"] {
-  if (
-    patch.providers === undefined &&
-    patch.metadataGeneration === undefined &&
-    patch.skills === undefined &&
-    !hasRestartRecoveryPatch(patch) &&
-    patch.idleRuntimeCleanup === undefined &&
-    removeProviders.length === 0
-  ) {
+  if (!hasMutableAgentPatch(patch, removeProviders)) {
     return persistedAgents;
   }
 
@@ -841,6 +877,12 @@ function mergeMutableAgentPatch(
   Object.assign(next, restartRecoveryPatch(patch));
   if (patch.idleRuntimeCleanup !== undefined) {
     next["idleRuntimeCleanup"] = patch.idleRuntimeCleanup;
+  }
+  if (patch.idleCompaction !== undefined) {
+    next["idleCompaction"] = mergeIdleCompactionPatch(
+      persistedAgents?.idleCompaction,
+      patch.idleCompaction,
+    );
   }
 
   return Object.keys(next).length > 0 ? (next as PersistedConfig["agents"]) : undefined;

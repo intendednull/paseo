@@ -25,6 +25,10 @@ import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import { readSpeechSettings } from "./speech/speech-settings.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
+import {
+  normalizeIdleCompactionSettings,
+  type IdleCompactionSettings,
+} from "./agent/idle-compaction/index.js";
 
 export {
   loadPersistedConfig,
@@ -596,6 +600,7 @@ export type ResolvedDaemonSettings = Pick<
   | "relayRequireProtectedSecurity"
   | "appBaseUrl"
   | "idleRuntimeCleanup"
+  | "idleCompaction"
   | "resumeOnStartup"
   | "resumePrompt"
   | "providerCatalogRefreshTimeoutMs"
@@ -685,6 +690,7 @@ export function resolveReloadableConfig(
     relayEnabled: relay.enabled,
     relayRequireProtectedSecurity: relay.requireProtectedSecurity,
     idleRuntimeCleanup: persisted.agents?.idleRuntimeCleanup ?? true,
+    idleCompaction: resolveIdleCompactionConfig(persisted.agents),
     ...resolveRestartRecoveryConfig(persisted.agents),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
@@ -835,6 +841,10 @@ function resolveSpeechOverrideControlledPaths(
   if (env.PASEO_VOICE_LLM_PROVIDER !== undefined) paths.push("features.voiceMode.llm.provider");
   if (env.PASEO_LOCAL_MODELS_DIR !== undefined) paths.push("providers.local.modelsDir");
   return paths;
+}
+
+function resolveIdleCompactionConfig(agents: PersistedConfig["agents"]): IdleCompactionSettings {
+  return normalizeIdleCompactionSettings(agents?.idleCompaction);
 }
 
 function resolveRestartRecoveryConfig(agents: PersistedConfig["agents"]) {

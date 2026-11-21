@@ -209,6 +209,37 @@ const MutableRelayConfigSchema = z
   })
   .passthrough();
 
+export const MutableIdleCompactionProviderConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  idleMinutes: z
+    .number()
+    .positive()
+    .max(24 * 60)
+    .optional(),
+  maxIdleMinutes: z
+    .number()
+    .positive()
+    .max(24 * 60)
+    .optional(),
+  minContextTokens: z.number().int().positive().optional(),
+});
+
+export const MutableIdleCompactionConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  idleMinutes: z
+    .number()
+    .positive()
+    .max(24 * 60)
+    .optional(),
+  maxIdleMinutes: z
+    .number()
+    .positive()
+    .max(24 * 60)
+    .optional(),
+  minContextTokens: z.number().int().positive().optional(),
+  providers: z.record(z.string().min(1), MutableIdleCompactionProviderConfigSchema).optional(),
+});
+
 export const MutableDaemonConfigSchema = z
   .object({
     // COMPAT(relayConfig): added in v0.2.6, remove after 2027-01-31 when old daemons are unsupported.
@@ -245,6 +276,8 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(idleRuntimeCleanupSetting): added in v0.13.0, keep optional while old daemons are supported.
     // Persisted host-wide value, applied live by the daemon.
     idleRuntimeCleanup: z.boolean().optional(),
+    // COMPAT(idleCompactionSetting): added in fork on v0.17.0-beta.1, keep optional for older hosts.
+    idleCompaction: MutableIdleCompactionConfigSchema.optional(),
     // COMPAT(restartRecovery): added in v0.14.0, keep optional for older hosts.
     resumeOnStartup: z.boolean().optional(),
     resumePrompt: z.string().optional(),
@@ -274,6 +307,7 @@ export const MutableDaemonConfigPatchSchema = z
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     idleRuntimeCleanup: z.boolean().optional(),
+    idleCompaction: MutableIdleCompactionConfigSchema.optional(),
     resumeOnStartup: z.boolean().optional(),
     resumePrompt: z.string().optional(),
     appendSystemPrompt: z.string().optional(),
