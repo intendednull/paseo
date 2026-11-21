@@ -194,6 +194,12 @@ export const PASEO_TOOL_CATALOG = {
     context: targetAgent(),
     detail: { inputOrder: ["agentId"] },
   },
+  compact_agent: {
+    label: "Compact agent",
+    completedLabel: "Compacted agent",
+    context: targetAgent(),
+    detail: { inputOrder: ["agentId", "instructions"] },
+  },
   archive_agent: {
     label: "Archive agent",
     completedLabel: "Archived agent",

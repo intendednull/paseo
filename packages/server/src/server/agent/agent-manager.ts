@@ -3,6 +3,7 @@ import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
 import type { RuntimeCleanupCandidate } from "./idle-runtime-cleanup/index.js";
 import { AgentNotFoundError, ensureAgentLoaded } from "./agent-loading.js";
+import { AgentTurnBusyError } from "./agent-prompt.js";
 import { continuesAssistantMessage, projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
@@ -29,6 +30,7 @@ import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 
 import {
+  AgentCompactionAdmitError,
   AgentTurnStartCanceledError,
   getAgentStreamEventTurnId,
   type AgentCapabilityFlags,
@@ -374,6 +376,86 @@ export interface CreateAgentOptions {
   owner?: AgentOwner;
   /** Background agents stay out of discovery, tabs, tracks and attention. Fixed at creation. */
   background?: boolean;
+}
+
+export class AgentCompactionUnsupportedError extends Error {
+  readonly provider: string;
+  constructor(provider: string) {
+    super(`Compaction is unsupported for ${provider}`);
+    this.name = "AgentCompactionUnsupportedError";
+    this.provider = provider;
+  }
+}
+
+export class AgentCompactionRefusedError extends Error {
+  readonly reason: "mid_turn" | "pending_permissions" | "archived" | "not_eligible";
+  constructor(
+    reason: "mid_turn" | "pending_permissions" | "archived" | "not_eligible",
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentCompactionRefusedError";
+    this.reason = reason;
+  }
+}
+
+export interface CompactAgentOptions {
+  instructions?: string;
+  trigger?: "manual" | "auto";
+  /** Optional revalidation gate checked right before admitting compaction. */
+  admit?: () => boolean;
+  /** Optional daemon-level protection check (pending finish subscriptions, queued messages). */
+  isProtected?: (agentId: string) => boolean;
+}
+
+export interface CompactAgentResult {
+  agentId: string;
+  provider: string;
+  contextTokensBefore: number | null;
+  contextTokensAfter: number | null;
+  contextWindowMaxTokens: number | null;
+  status: AgentLifecycleStatus;
+}
+
+interface SlashCompactionTracker {
+  observedPreTokens: number | undefined;
+  sawCompactionCompleted: boolean;
+  postCompactionUsageTokens: number | undefined;
+  turnError: string | undefined;
+}
+
+function observeSlashCompactionEvent(
+  event: AgentStreamEvent,
+  tracker: SlashCompactionTracker,
+): void {
+  if (
+    event.type === "timeline" &&
+    event.item.type === "compaction" &&
+    event.item.status === "completed" &&
+    event.item.trigger !== undefined
+  ) {
+    tracker.sawCompactionCompleted = true;
+    tracker.postCompactionUsageTokens = undefined;
+    if (event.item.preTokens !== undefined) {
+      tracker.observedPreTokens = event.item.preTokens;
+    }
+    return;
+  }
+  const usageTokens =
+    event.type === "usage_updated" || event.type === "turn_completed"
+      ? event.usage?.contextWindowUsedTokens
+      : undefined;
+  if (usageTokens !== undefined) {
+    if (tracker.sawCompactionCompleted) {
+      tracker.postCompactionUsageTokens = usageTokens;
+    }
+    return;
+  }
+  if (event.type === "turn_failed") {
+    tracker.turnError = event.error || "Compaction failed";
+  } else if (event.type === "turn_canceled") {
+    tracker.turnError = event.reason || "Compaction was canceled";
+  }
 }
 
 export interface AgentManagerOptions {
@@ -880,6 +962,9 @@ export class AgentManager {
     { readonly openedAt: number }
   >();
   private readonly collectingRuntimes = new Set<string>();
+  private compactionAdmitRun: { agentId: string; token: string } | null = null;
+  private compactionProtectionCheck: (agentId: string) => boolean = () => false;
+  private readonly knownParentIds = new Map<string, string | null>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
@@ -1000,6 +1085,10 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+  }
+
+  setCompactionProtectionCheck(check: (agentId: string) => boolean): void {
+    this.compactionProtectionCheck = check;
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -2150,12 +2239,25 @@ export class AgentManager {
     return candidates;
   }
 
-  private runtimeHasNoPendingWork(agent: LiveManagedAgent): boolean {
+  private hasRunningBackgroundWork(agentId: string): boolean {
+    const summary = this.backgroundWork.summary(agentId);
+    if (!summary) return false;
+    return (summary.runningCount ?? summary.count) > 0;
+  }
+
+  private runtimeHasNoPendingWork(
+    agent: LiveManagedAgent,
+    options?: { allowRunToken?: string },
+  ): boolean {
+    const activeRun = this.runs.getRun(agent.id);
+    const blockedByRun =
+      activeRun !== null &&
+      (options?.allowRunToken === undefined || activeRun.token !== options.allowRunToken);
     return (
       agent.lifecycle === "idle" &&
       !agent.internal &&
       agent.activeForegroundTurnId === null &&
-      !this.runs.hasRun(agent.id) &&
+      !blockedByRun &&
       !agent.pendingReplacement &&
       agent.pendingPermissions.size === 0 &&
       agent.inFlightPermissionResponses.size === 0 &&
@@ -2717,6 +2819,7 @@ export class AgentManager {
     const liveAgent = this.agents.get(agentId);
     if (liveAgent) {
       liveAgent.labels = applyRecordPatch(liveAgent.labels, patch);
+      this.knownParentIds.set(agentId, getParentAgentIdFromLabels(liveAgent.labels));
       this.touchUpdatedAt(liveAgent);
       await this.persistSnapshot(liveAgent);
       this.emitState(liveAgent, { persist: false });
@@ -2725,6 +2828,7 @@ export class AgentManager {
     }
 
     const nextRecord = await this.writeStoredMetadata(agentId, { labels: patch });
+    this.knownParentIds.set(agentId, getParentAgentIdFromLabels(nextRecord.labels));
     return { record: nextRecord, live: false };
   }
 
@@ -3160,6 +3264,364 @@ export class AgentManager {
     return { seq: row.seq, epoch: this.timelineStore.getEpoch(agentId) };
   }
 
+  private resolveParentIdSync(agentId: string): { known: boolean; parentId: string | null } {
+    const live = this.agents.get(agentId);
+    if (live) {
+      return { known: true, parentId: getParentAgentIdFromLabels(live.labels) };
+    }
+    if (this.registry) {
+      if (!this.registry.isLoaded()) {
+        return { known: false, parentId: null };
+      }
+      const stored = this.registry.getCached(agentId);
+      if (stored) {
+        return { known: true, parentId: getParentAgentIdFromLabels(stored.labels) };
+      }
+    }
+    if (this.knownParentIds.has(agentId)) {
+      return { known: true, parentId: this.knownParentIds.get(agentId) ?? null };
+    }
+    return { known: false, parentId: null };
+  }
+
+  private findLiveDescendantBlockerSync(
+    root: LiveManagedAgent,
+  ): { agentId: string; reason: "live_descendant" | "unresolved_ancestry" } | null {
+    for (const candidate of this.agents.values()) {
+      if (candidate.id === root.id) continue;
+      let parentId = getParentAgentIdFromLabels(candidate.labels);
+      const visited = new Set<string>([candidate.id]);
+      while (parentId !== null) {
+        if (parentId === root.id) {
+          return { agentId: candidate.id, reason: "live_descendant" };
+        }
+        if (visited.has(parentId)) {
+          break;
+        }
+        visited.add(parentId);
+        const resolved = this.resolveParentIdSync(parentId);
+        if (!resolved.known) {
+          return { agentId: candidate.id, reason: "unresolved_ancestry" };
+        }
+        parentId = resolved.parentId;
+      }
+    }
+    return null;
+  }
+
+  private hasPendingRuntimeActivity(agentId: string): boolean {
+    return (
+      this.collectingRuntimes.has(agentId) ||
+      this.lifecycleMutationTails.has(agentId) ||
+      this.foregroundMutationTails.has(agentId) ||
+      this.replacementMutationTails.has(agentId) ||
+      this.sessionEventTails.has(agentId)
+    );
+  }
+
+  private isAgentMidTurnForCompaction(agent: LiveManagedAgent, allowedRunToken?: string): boolean {
+    const currentRun = this.runs.getRun(agent.id);
+    const foreignOrLostRun =
+      allowedRunToken !== undefined
+        ? currentRun === null || currentRun.token !== allowedRunToken
+        : currentRun !== null;
+    return (
+      agent.lifecycle === "running" ||
+      agent.lifecycle === "initializing" ||
+      agent.activeForegroundTurnId !== null ||
+      foreignOrLostRun ||
+      agent.pendingReplacement
+    );
+  }
+
+  private assertAgentSafeForCompaction(
+    agent: LiveManagedAgent,
+    options: {
+      trigger: "manual" | "auto";
+      isProtected: (agentId: string) => boolean;
+      admit?: () => boolean;
+      allowedRunToken?: string;
+    },
+  ): void {
+    if (!this.acceptingAgentRegistrations) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: daemon is shutting down`,
+      );
+    }
+    if (this.agents.get(agent.id) !== agent) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent runtime changed`,
+      );
+    }
+    if (this.isAgentMidTurnForCompaction(agent, options.allowedRunToken)) {
+      throw new AgentCompactionRefusedError(
+        "mid_turn",
+        `Cannot compact agent ${agent.id}: agent is currently mid-turn (status: ${agent.lifecycle})`,
+      );
+    }
+    if (agent.pendingPermissions.size > 0 || agent.inFlightPermissionResponses.size > 0) {
+      throw new AgentCompactionRefusedError(
+        "pending_permissions",
+        `Cannot compact agent ${agent.id}: agent has pending permission requests`,
+      );
+    }
+    if (agent.lifecycle !== "idle" || (options.trigger === "auto" && agent.internal)) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent is not idle (status: ${agent.lifecycle})`,
+      );
+    }
+    if (this.hasPendingRuntimeActivity(agent.id)) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent has pending lifecycle or session activity`,
+      );
+    }
+    if (
+      this.hasRunningBackgroundWork(agent.id) ||
+      this.providerSubagents.list(agent.id).some((child) => child.status === "running")
+    ) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent has active background work`,
+      );
+    }
+    const descendantBlocker = this.findLiveDescendantBlockerSync(agent);
+    if (descendantBlocker) {
+      const detail =
+        descendantBlocker.reason === "live_descendant"
+          ? `live descendant agent ${descendantBlocker.agentId} is still open`
+          : `cannot verify ancestry of live agent ${descendantBlocker.agentId}`;
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: ${detail}`,
+      );
+    }
+    if (options.isProtected(agent.id)) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent has queued messages or pending child notifications`,
+      );
+    }
+    if (options.admit && !options.admit()) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: agent is no longer eligible for compaction`,
+      );
+    }
+  }
+
+  private async verifyRootProviderSafety(agent: LiveManagedAgent): Promise<void> {
+    if (typeof agent.session.canStopRuntime !== "function") {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: provider ${agent.provider} cannot verify runtime safety`,
+      );
+    }
+    let safe = false;
+    try {
+      safe =
+        (await withTimeout(
+          agent.session.canStopRuntime(),
+          10_000,
+          `Runtime safety probe timed out for ${agent.id}`,
+        )) === true;
+    } catch {
+      safe = false;
+    }
+    if (!safe) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agent.id}: provider runtime reported active work`,
+      );
+    }
+  }
+
+  private async ensureAgentReadyForCompaction(
+    agentId: string,
+    trigger: "manual" | "auto",
+  ): Promise<LiveManagedAgent> {
+    if (!this.acceptingAgentRegistrations) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Cannot compact agent ${agentId}: daemon is shutting down`,
+      );
+    }
+    if (trigger === "auto") {
+      if (!this.agents.has(agentId) || this.collectingRuntimes.has(agentId)) {
+        throw new AgentCompactionRefusedError(
+          "not_eligible",
+          `Cannot compact agent ${agentId}: agent runtime is not live`,
+        );
+      }
+    } else if (this.collectingRuntimes.has(agentId) || !this.agents.has(agentId)) {
+      if (!this.registry) {
+        throw new AgentNotFoundError(agentId);
+      }
+      const stored = await this.registry.get(agentId);
+      if (!stored) {
+        throw new AgentNotFoundError(agentId);
+      }
+      if (stored.archivedAt) {
+        throw new AgentCompactionRefusedError(
+          "archived",
+          `Cannot compact archived agent ${agentId}`,
+        );
+      }
+      await this.waitForAgentClose(agentId);
+      await ensureAgentLoaded(agentId, {
+        agentManager: this,
+        agentStorage: this.registry,
+        logger: this.logger,
+      });
+    }
+    return this.ensureInteractiveSession(agentId);
+  }
+
+  private async runSlashCompaction(
+    agent: ActiveManagedAgent,
+    pendingRun: PendingForegroundRun,
+    options: {
+      instructions?: string;
+      preUsageTokens?: number;
+      admitBeforeDispatch: () => boolean;
+    },
+  ): Promise<{ contextTokensBefore: number | null; contextTokensAfter: number | null }> {
+    const command = options.instructions ? `/compact ${options.instructions}` : "/compact";
+    const tracker = {
+      observedPreTokens: undefined as number | undefined,
+      sawCompactionCompleted: false,
+      postCompactionUsageTokens: undefined as number | undefined,
+      turnError: undefined as string | undefined,
+    };
+
+    try {
+      const stream = this.streamAgentWithPendingRun(agent, pendingRun, command, {
+        admitBeforeDispatch: options.admitBeforeDispatch,
+      });
+      for await (const event of stream) {
+        observeSlashCompactionEvent(event, tracker);
+      }
+    } catch (error) {
+      if (error instanceof AgentCompactionAdmitError) {
+        throw new AgentCompactionRefusedError("not_eligible", error.message);
+      }
+      throw error;
+    }
+    await this.drainSessionEvents(agent.id);
+    if (tracker.turnError !== undefined) {
+      throw new Error(tracker.turnError);
+    }
+    if (!tracker.sawCompactionCompleted) {
+      throw new Error("Compaction did not complete (no compact_boundary received from provider)");
+    }
+    return {
+      contextTokensBefore: tracker.observedPreTokens ?? options.preUsageTokens ?? null,
+      contextTokensAfter: tracker.postCompactionUsageTokens ?? null,
+    };
+  }
+
+  private async assertCompactionSupported(agent: LiveManagedAgent): Promise<void> {
+    if (agent.provider !== "claude") {
+      throw new AgentCompactionUnsupportedError(agent.provider);
+    }
+    const supported = agent.session.supportsCompaction
+      ? (await withTimeout(
+          Promise.resolve(agent.session.supportsCompaction()),
+          10_000,
+          `Compaction capability probe timed out for ${agent.id}`,
+        )) === true
+      : false;
+    if (!supported) {
+      throw new AgentCompactionUnsupportedError(agent.provider);
+    }
+  }
+
+  async compactAgent(agentId: string, options?: CompactAgentOptions): Promise<CompactAgentResult> {
+    const trigger = options?.trigger ?? "manual";
+    const instructions = options?.instructions?.trim() || undefined;
+    const isProtected = (id: string) =>
+      this.compactionProtectionCheck(id) || (options?.isProtected?.(id) ?? false);
+
+    if (this.registry && !this.registry.isLoaded()) {
+      await this.registry.initialize();
+    }
+    const agent = await this.ensureAgentReadyForCompaction(agentId, trigger);
+    // Check baseline idle/mid-turn state before capability discovery so busy targets
+    // fail fast with mid_turn / pending_permissions.
+    this.assertAgentSafeForCompaction(agent, {
+      trigger,
+      isProtected,
+      admit: options?.admit,
+    });
+
+    await this.assertCompactionSupported(agent);
+
+    this.assertAgentSafeForCompaction(agent, {
+      trigger,
+      isProtected,
+      admit: options?.admit,
+    });
+
+    // Claim the agent's ordinary foreground run slot so concurrent prompts and queued
+    // agent messages receive AgentTurnBusyError and requeue cleanly.
+    const pendingRun = this.runs.createPendingRun(agentId);
+    try {
+      await this.verifyRootProviderSafety(agent);
+
+      const admitBeforeDispatch = (): boolean => {
+        try {
+          this.compactionAdmitRun = { agentId, token: pendingRun.token };
+          try {
+            this.assertAgentSafeForCompaction(agent, {
+              trigger,
+              isProtected,
+              admit: options?.admit,
+              allowedRunToken: pendingRun.token,
+            });
+          } finally {
+            this.compactionAdmitRun = null;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      if (!admitBeforeDispatch()) {
+        throw new AgentCompactionRefusedError(
+          "not_eligible",
+          `Cannot compact agent ${agentId}: agent is no longer eligible for compaction`,
+        );
+      }
+
+      const preUsageTokens = agent.lastUsage?.contextWindowUsedTokens;
+      const counts = await this.runSlashCompaction(agent as ActiveManagedAgent, pendingRun, {
+        instructions,
+        preUsageTokens,
+        admitBeforeDispatch,
+      });
+      const current = this.agents.get(agentId) ?? agent;
+      return {
+        agentId,
+        provider: current.provider,
+        contextTokensBefore: counts.contextTokensBefore,
+        contextTokensAfter: counts.contextTokensAfter,
+        contextWindowMaxTokens: current.lastUsage?.contextWindowMaxTokens ?? null,
+        status: current.lifecycle,
+      };
+    } finally {
+      if (!pendingRun.settled) {
+        this.runs.settleForegroundRun(agentId, pendingRun.token);
+        if (this.agents.get(agentId) === agent) {
+          this.emitState(agent, { persist: false });
+        }
+      }
+    }
+  }
+
   async emitLiveTimelineItem(agentId: string, item: AgentTimelineItem): Promise<void> {
     const agent = this.requireAgent(agentId);
     this.touchUpdatedAt(agent);
@@ -3168,6 +3630,24 @@ export class AgentManager {
       item,
       provider: agent.provider,
     });
+  }
+
+  private abortPendingCompactionStart(
+    agent: ActiveManagedAgent,
+    agentId: string,
+    pendingRun: PendingForegroundRun,
+    error: AgentCompactionAdmitError,
+  ): never {
+    if (!pendingRun.settled) {
+      this.runs.settleForegroundStart(pendingRun, {
+        status: "failed",
+        error: error.message,
+      });
+      agent.pendingReplacement = false;
+      if (!agent.activeForegroundTurnId) agent.lifecycle = "idle";
+      this.runs.settleForegroundRun(agentId, pendingRun.token);
+    }
+    throw error;
   }
 
   private async startPendingForegroundTurn(params: {
@@ -3183,6 +3663,14 @@ export class AgentManager {
       this.runs.settleForegroundRun(agentId, pendingRun.token);
       return null;
     }
+    if (options?.admitBeforeDispatch?.() === false) {
+      this.abortPendingCompactionStart(
+        agent,
+        agentId,
+        pendingRun,
+        new AgentCompactionAdmitError(`Agent ${agentId} is no longer idle for compaction`),
+      );
+    }
     try {
       const result = await agent.session.startTurn(prompt, options);
       if (pendingRun.settled) {
@@ -3190,6 +3678,9 @@ export class AgentManager {
       }
       return result.turnId;
     } catch (error) {
+      if (error instanceof AgentCompactionAdmitError) {
+        this.abortPendingCompactionStart(agent, agentId, pendingRun, error);
+      }
       if (error instanceof AgentTurnStartCanceledError) {
         if (!pendingRun.settled) {
           if (options?.clientMessageId) {
@@ -3329,14 +3820,23 @@ export class AgentManager {
         },
         "agent.manager.stream.reject",
       );
-      throw new Error(`Agent ${agentId} already has an active run`);
+      throw new AgentTurnBusyError(`Agent ${agentId} already has an active run`);
     }
 
-    const agent = existingAgent;
+    const pendingRun = this.runs.createPendingRun(agentId);
+    return this.streamAgentWithPendingRun(existingAgent, pendingRun, prompt, options, promptStart);
+  }
+
+  private streamAgentWithPendingRun(
+    agent: ActiveManagedAgent,
+    pendingRun: PendingForegroundRun,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+    promptStart?: ForegroundPromptStart,
+  ): AsyncGenerator<AgentStreamEvent> {
+    const agentId = agent.id;
     const isReplacement = agent.pendingReplacement;
     agent.lastError = undefined;
-
-    const pendingRun = this.runs.createPendingRun(agentId);
     promptStart?.bind(pendingRun);
 
     const streamForwarder = async function* streamForwarder(this: AgentManager) {
@@ -4454,6 +4954,7 @@ export class AgentManager {
       this.assertAcceptingAgentRegistrations();
       this.runtimeCleanupIdentities.set(session, Object.freeze({ openedAt: Date.now() }));
       this.agents.set(resolvedAgentId, managed);
+      this.knownParentIds.set(resolvedAgentId, getParentAgentIdFromLabels(managed.labels));
       registered = true;
       // Initialize previousStatus to track transitions
       this.previousStatuses.set(resolvedAgentId, managed.lifecycle);

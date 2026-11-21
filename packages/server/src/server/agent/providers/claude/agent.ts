@@ -143,6 +143,7 @@ import {
   type McpServerConfig,
   type ProviderCatalog,
   type ProviderRefreshContext,
+  AgentCompactionAdmitError,
   type ResolveAgentDefaultModeInput,
   type ToolCallDetail,
 } from "../../agent-sdk-types.js";
@@ -2419,6 +2420,7 @@ class ClaudeAgentSession implements AgentSession {
   private lastRuntimeModel: string | null = null;
   private compacting = false;
   private compactionMarkerOpen = false;
+  private activeTurnCompactError: string | null = null;
   private queryPumpPromise: Promise<void> | null = null;
   private queryRestartNeeded = false;
   /** True from the moment a query's launch options are copied until the query exists. */
@@ -2568,6 +2570,47 @@ class ClaudeAgentSession implements AgentSession {
     return result;
   }
 
+  private assertAdmittedForCompaction(admitBeforeDispatch: () => boolean, message: string): void {
+    let admitted = false;
+    try {
+      admitted = this.isRuntimeSafeSync() && admitBeforeDispatch() === true;
+    } catch {
+      admitted = false;
+    }
+    if (!admitted) {
+      throw new AgentCompactionAdmitError(message);
+    }
+  }
+
+  private installForegroundTurnCancel(sdkUserMessageId: string | null): () => boolean {
+    let cancelIssued = false;
+    const requestCancel = () => {
+      if (cancelIssued) {
+        return;
+      }
+      cancelIssued = true;
+      if (this.cancelCurrentTurn === requestCancel) {
+        this.cancelCurrentTurn = null;
+      }
+      // Whether Claude has this message in hand. A late idle from the previous turn can clear
+      // mainTurnInFlight after Claude started it, so the message's own lifecycle counts too.
+      const claudeStartedTurn =
+        this.mainTurnInFlight ||
+        (sdkUserMessageId !== null && !this.unstartedMessageUuids.has(sdkUserMessageId));
+      this.rejectAllPendingPermissions(new Error("Permission request canceled"));
+      this.finishForegroundTurn({
+        type: "turn_canceled",
+        provider: "claude",
+        reason: "Interrupted",
+      });
+      void this.interruptActiveTurn(claudeStartedTurn).catch((error) => {
+        this.logger.warn({ err: error }, "Failed to interrupt during cancel");
+      });
+    };
+    this.cancelCurrentTurn = requestCancel;
+    return () => cancelIssued;
+  }
+
   async startTurn(
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
@@ -2578,6 +2621,26 @@ class ClaudeAgentSession implements AgentSession {
     }
     if (this.activeForegroundTurnId) {
       throw new Error("A foreground turn is already active");
+    }
+
+    const admitBeforeDispatch = options?.admitBeforeDispatch;
+    let alreadyEnsuredQuery = false;
+    if (admitBeforeDispatch) {
+      this.assertAdmittedForCompaction(
+        admitBeforeDispatch,
+        "Claude session is no longer idle for compaction",
+      );
+      await this.ensureQuery();
+      alreadyEnsuredQuery = true;
+      // Final synchronous check inline in startTurn after its last await: zero microtask
+      // gap before mutating foreground state or calling this.input.push(sdkMessage).
+      this.assertAdmittedForCompaction(
+        admitBeforeDispatch,
+        "Claude session became busy before compaction dispatch",
+      );
+      if (!this.input) {
+        throw new Error("Claude session input stream not initialized");
+      }
     }
 
     const slashCommand = this.resolveSlashCommandInvocation(prompt);
@@ -2608,37 +2671,14 @@ class ClaudeAgentSession implements AgentSession {
     this.clearRecentStderr();
     if (sdkUserMessageId) this.unstartedMessageUuids.add(sdkUserMessageId);
 
-    let cancelIssued = false;
-    const requestCancel = () => {
-      if (cancelIssued) {
-        return;
-      }
-      cancelIssued = true;
-      if (this.cancelCurrentTurn === requestCancel) {
-        this.cancelCurrentTurn = null;
-      }
-      // Whether Claude has this message in hand. A late idle from the previous turn can clear
-      // mainTurnInFlight after Claude started it, so the message's own lifecycle counts too.
-      const claudeStartedTurn =
-        this.mainTurnInFlight ||
-        (sdkUserMessageId !== null && !this.unstartedMessageUuids.has(sdkUserMessageId));
-      this.rejectAllPendingPermissions(new Error("Permission request canceled"));
-      this.finishForegroundTurn({
-        type: "turn_canceled",
-        provider: "claude",
-        reason: "Interrupted",
-      });
-      void this.interruptActiveTurn(claudeStartedTurn).catch((error) => {
-        this.logger.warn({ err: error }, "Failed to interrupt during cancel");
-      });
-    };
-    this.cancelCurrentTurn = requestCancel;
-
+    const isCanceled = this.installForegroundTurnCancel(sdkUserMessageId);
     this.notifySubscribers({ type: "turn_started", provider: "claude" });
 
     try {
-      await this.ensureQuery();
-      if (cancelIssued) {
+      if (!alreadyEnsuredQuery) {
+        await this.ensureQuery();
+      }
+      if (isCanceled()) {
         // Stopped while Claude was still starting up: withdrawn by never sending it.
         if (sdkUserMessageId) this.unstartedMessageUuids.delete(sdkUserMessageId);
         return { turnId };
@@ -3180,8 +3220,15 @@ class ClaudeAgentSession implements AgentSession {
     return this.persistence;
   }
 
-  async canStopRuntime(): Promise<boolean> {
+  supportsCompaction(): boolean {
+    return true;
+  }
+
+  private isRuntimeSafeSync(): boolean {
     return (
+      !this.closed &&
+      !this.compacting &&
+      !this.compactionMarkerOpen &&
       !this.activeForegroundTurnId &&
       !this.autonomousTurn &&
       !this.mainTurnInFlight &&
@@ -3190,6 +3237,10 @@ class ClaudeAgentSession implements AgentSession {
       this.processingSdkMessages === 0 &&
       this.runtimeSafety.canStopRuntime()
     );
+  }
+
+  async canStopRuntime(): Promise<boolean> {
+    return this.isRuntimeSafeSync();
   }
 
   async close(): Promise<void> {
@@ -4244,6 +4295,7 @@ class ClaudeAgentSession implements AgentSession {
     this.cancelCurrentTurn = null;
     this.activeTurnHasAssistantText = false;
     this.compactionMarkerOpen = false;
+    this.activeTurnCompactError = null;
     this.syncTurnState("foreground turn terminal");
   }
 
@@ -5041,38 +5093,12 @@ class ClaudeAgentSession implements AgentSession {
       return;
     }
     if (message.subtype === "status") {
-      // Claude Code reports a mode it switched to on its own, such as entering
-      // plan mode with the EnterPlanMode tool, through the status message.
-      if (
-        isPermissionMode(message.permissionMode) &&
-        this.observePermissionMode(message.permissionMode)
-      ) {
-        events.push({
-          type: "mode_changed",
-          provider: "claude",
-          currentModeId: this.currentMode,
-          availableModes: this.availableModes,
-        });
-      }
-      const status = toObjectRecord(message)?.status;
-      if (status === "compacting") {
-        this.compacting = true;
-        // Claude Code repeats this status every 30 seconds until the compaction
-        // finishes. Each repeat used to open its own marker, and the app only ever
-        // resolves one of them, so the rest stayed on "Compacting..." forever.
-        if (!this.compactionMarkerOpen) {
-          this.compactionMarkerOpen = true;
-          events.push({
-            type: "timeline",
-            item: { type: "compaction", status: "loading" },
-            provider: "claude",
-          });
-        }
-      }
+      this.appendSystemStatusEvents(message, events);
       return;
     }
     if (message.subtype === "compact_boundary") {
       this.compactionMarkerOpen = false;
+      this.activeTurnCompactError = null;
       const compactMetadata = readCompactionMetadata(message);
       events.push({
         type: "timeline",
@@ -5100,6 +5126,59 @@ class ClaudeAgentSession implements AgentSession {
     }
     if (message.subtype === "task_progress") {
       return;
+    }
+  }
+
+  private appendSystemStatusEvents(
+    message: Extract<SDKMessage, { type: "system"; subtype: "status" }>,
+    events: AgentStreamEvent[],
+  ): void {
+    // Claude Code reports a mode it switched to on its own, such as entering
+    // plan mode with the EnterPlanMode tool, through the status message.
+    if (
+      isPermissionMode(message.permissionMode) &&
+      this.observePermissionMode(message.permissionMode)
+    ) {
+      events.push({
+        type: "mode_changed",
+        provider: "claude",
+        currentModeId: this.currentMode,
+        availableModes: this.availableModes,
+      });
+    }
+    const statusRecord = toObjectRecord(message);
+    const status = statusRecord?.status;
+    if (status === "compacting") {
+      this.compacting = true;
+      this.activeTurnCompactError = null;
+      // Claude Code repeats this status every 30 seconds until the compaction
+      // finishes. Each repeat used to open its own marker, and the app only ever
+      // resolves one of them, so the rest stayed on "Compacting..." forever.
+      if (!this.compactionMarkerOpen) {
+        this.compactionMarkerOpen = true;
+        events.push({
+          type: "timeline",
+          item: { type: "compaction", status: "loading" },
+          provider: "claude",
+        });
+      }
+      return;
+    }
+    if (status === null && statusRecord?.compact_result === "failed") {
+      if (this.compactionMarkerOpen) {
+        this.compactionMarkerOpen = false;
+        events.push({
+          type: "timeline",
+          item: { type: "compaction", status: "completed" },
+          provider: "claude",
+        });
+      }
+      this.compacting = false;
+      const rawError = statusRecord.compact_error;
+      this.activeTurnCompactError =
+        typeof rawError === "string" && rawError.trim().length > 0
+          ? rawError.trim()
+          : "Compaction failed";
     }
   }
 
@@ -5268,6 +5347,14 @@ class ClaudeAgentSession implements AgentSession {
     const releasedErrorReply = this.withheldErrorReply.length > 0;
     this.releaseWithheldErrorReply(events);
     if (message.subtype === "success") {
+      if (this.activeTurnCompactError) {
+        const compactError = this.activeTurnCompactError;
+        this.activeTurnCompactError = null;
+        if (usage) events.push({ type: "usage_updated", provider: "claude", usage });
+        events.push(...this.sidechainTracker.finishAll("failed"));
+        events.push(this.buildTurnFailedEvent(compactError));
+        return;
+      }
       events.push(...this.sidechainTracker.finishAll("completed"));
       // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")
       // run client-side in the Claude CLI with no model turn — output_tokens

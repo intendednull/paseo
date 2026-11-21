@@ -1539,12 +1539,15 @@ export async function createPaseoDaemon(
     }),
   });
 
+  const isProtectedFromInterruption = (agentId: string) =>
+    finishSubscriptions.hasPendingForCaller(agentId) ||
+    (wsServer?.agentMessages.hasPending(agentId) ?? false);
+  agentManager.setCompactionProtectionCheck(isProtectedFromInterruption);
+
   const idleRuntimeCleanup = createIdleRuntimeCleanup({
     enabled: daemonConfigStore.get().idleRuntimeCleanup !== false,
     runtimes: () => agentManager.getRuntimeCleanupCandidates(),
-    isProtected: (agentId) =>
-      finishSubscriptions.hasPendingForCaller(agentId) ||
-      (wsServer?.agentMessages.hasPending(agentId) ?? false),
+    isProtected: isProtectedFromInterruption,
     logger,
   });
 
