@@ -4,6 +4,11 @@ import { sendPromptToAgent, unarchiveAgentState } from "./agent/agent-prompt.js"
 import { createChangeRequestWatches } from "./agent/change-request-watches/index.js";
 import { createIdleRuntimeCleanup } from "./agent/idle-runtime-cleanup/index.js";
 import {
+  createIdleCompaction,
+  normalizeIdleCompactionSettings,
+  type IdleCompactionSettings,
+} from "./agent/idle-compaction/index.js";
+import {
   createFinishSubscriptions,
   createFinishObservation,
   createJsonFinishSubscriptionStore,
@@ -469,6 +474,7 @@ export interface PaseoDaemonConfig {
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   idleRuntimeCleanup?: boolean;
+  idleCompaction?: IdleCompactionSettings;
   resumeOnStartup?: boolean;
   resumePrompt?: string;
   providerCatalogRefreshTimeoutMs?: number;
@@ -602,6 +608,7 @@ function createInitialMutableDaemonConfig(config: ResolvedDaemonSettings): Mutab
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     idleRuntimeCleanup: config.idleRuntimeCleanup !== false,
+    idleCompaction: normalizeIdleCompactionSettings(config.idleCompaction),
     resumeOnStartup: config.resumeOnStartup === true,
     resumePrompt: config.resumePrompt ?? "Resume working.",
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -1556,6 +1563,15 @@ export async function createPaseoDaemon(
     idleRuntimeCleanup,
   );
 
+  const idleCompaction = createIdleCompaction({
+    settings: normalizeIdleCompactionSettings(daemonConfigStore.get().idleCompaction),
+    runtimes: () => agentManager.getIdleCompactionCandidates(),
+    isProtected: isProtectedFromInterruption,
+    logger,
+  });
+
+  const unsubscribeIdleCompaction = connectIdleCompactionConfig(daemonConfigStore, idleCompaction);
+
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2019,6 +2035,10 @@ export async function createPaseoDaemon(
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
+    unsubscribeIdleCompaction();
+    // Stop admitting new idle compactions immediately; drain any in-flight sweep
+    // after closeAllAgents cancels/closes sessions through the bounded lifecycle.
+    idleCompaction.stop();
     unsubscribeIdleRuntimeCleanup();
     await idleRuntimeCleanup.close();
     // Freeze both ingress and registration before taking the agent closure snapshot.
@@ -2029,6 +2049,11 @@ export async function createPaseoDaemon(
     agentManager.prepareForShutdown();
     await restartRecovery.captureRunningAgents();
     await closeAllAgents(logger, agentManager);
+    await withTimeout({
+      promise: idleCompaction.close(),
+      timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
+      label: "drain idle compaction",
+    }).catch((error) => logger.warn({ err: error }, "Idle compaction did not finish"));
     await withTimeout({
       promise: pluginRuntime.drainEvents(),
       timeoutMs: AGENT_CLOSE_TIMEOUT_MS,
@@ -2125,4 +2150,18 @@ export function connectIdleRuntimeCleanupConfig(
 ): () => void {
   cleanup.setEnabled(store.get().idleRuntimeCleanup !== false);
   return store.onFieldChange("idleRuntimeCleanup", (value) => cleanup.setEnabled(value !== false));
+}
+
+export function connectIdleCompactionConfig(
+  store: DaemonConfigStore,
+  idleCompaction: Pick<ReturnType<typeof createIdleCompaction>, "updateSettings">,
+): () => void {
+  idleCompaction.updateSettings(store.get().idleCompaction);
+  return store.onFieldChange("idleCompaction", (value) =>
+    idleCompaction.updateSettings(
+      typeof value === "object" && value !== null
+        ? (value as Partial<IdleCompactionSettings>)
+        : undefined,
+    ),
+  );
 }

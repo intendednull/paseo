@@ -46,6 +46,7 @@ The commit trailers are authoritative; this is the summary.
 | feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode         |
 | fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json   |
 | feat(server): add compact_agent MCP tool                 | upstream ships a remote compaction MCP tool (#8708)     |
+| feat(server): auto-compact idle agents before cache TTL  | upstream ships per-provider idle auto-compaction        |
 
 ## Branches
 
