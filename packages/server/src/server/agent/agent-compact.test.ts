@@ -24,6 +24,10 @@ import {
 } from "./agent-prompt.js";
 import { createAgentMessageDelivery } from "./agent-messages/delivery.js";
 import {
+  createFinishSubscriptions,
+  type FinishSubscription,
+} from "./finish-subscriptions/index.js";
+import {
   AgentCompactionAdmitError,
   type AgentCapabilityFlags,
   type AgentClient,
@@ -661,10 +665,14 @@ describe("AgentManager.compactAgent", () => {
     });
     const parentSession = sessions[0]!;
 
-    // 1. Protected agent (queued messages / pending finish subscriptions) is refused.
+    // 1. Protected agent (queued messages for manual; queued messages or finish subscriptions for auto) is refused.
     let protectedIds = new Set<string>([parent.id]);
     manager.setCompactionProtectionCheck((id) => protectedIds.has(id));
     await expect(manager.compactAgent(parent.id)).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof AgentCompactionRefusedError && error.message.includes("queued messages"),
+    );
+    await expect(manager.compactAgent(parent.id, { trigger: "auto" })).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof AgentCompactionRefusedError &&
         error.message.includes("queued messages or pending child notifications"),
@@ -719,7 +727,7 @@ describe("AgentManager.compactAgent", () => {
     expect(parentSession.prompts).toEqual([]);
   });
 
-  test("refuses compaction whenever the root has any live descendant (even idle) or one spawns before dispatch, and allows compaction once closed or archived", async () => {
+  test("auto compaction refuses whenever the root has any live descendant (even idle) or one spawns before dispatch, and allows compaction once closed or archived", async () => {
     const root = await createTempDir("paseo-compact-descendant-");
     const logger = createTestLogger();
     const storage = new AgentStorage(path.join(root, "agents"), logger);
@@ -750,13 +758,13 @@ describe("AgentManager.compactAgent", () => {
       });
       const parentSession = claudeSessions[0]!;
 
-      // 1. Live idle Claude descendant refuses manual compaction.
+      // 1. Live idle Claude descendant refuses auto compaction.
       const idleClaudeChild = await manager.createAgent(
         { provider: "claude", cwd: root },
         randomUUID(),
         { workspaceId: "ws-1", labels: { [PARENT_AGENT_ID_LABEL]: parent.id } },
       );
-      await expect(manager.compactAgent(parent.id)).rejects.toSatisfy(
+      await expect(manager.compactAgent(parent.id, { trigger: "auto" })).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof AgentCompactionRefusedError &&
           error.reason === "not_eligible" &&
@@ -765,19 +773,19 @@ describe("AgentManager.compactAgent", () => {
       expect(parentSession.prompts).toEqual([]);
       expect(manager.hasInFlightRun(parent.id)).toBe(false);
 
-      // 2. Closing the descendant unblocks compaction.
+      // 2. Closing the descendant unblocks auto compaction.
       await manager.closeAgent(idleClaudeChild.id);
-      const afterClose = await manager.compactAgent(parent.id);
+      const afterClose = await manager.compactAgent(parent.id, { trigger: "auto" });
       expect(afterClose.contextTokensAfter).toBe(18_400);
       expect(parentSession.prompts).toEqual(["/compact"]);
 
-      // 3. Live idle ACP descendant refuses manual compaction; archiving unblocks it.
+      // 3. Live idle ACP descendant refuses auto compaction; archiving unblocks it.
       const idleAcpChild = await manager.createAgent(
         { provider: "claude-acp", cwd: root },
         randomUUID(),
         { workspaceId: "ws-1", labels: { [PARENT_AGENT_ID_LABEL]: parent.id } },
       );
-      await expect(manager.compactAgent(parent.id)).rejects.toSatisfy(
+      await expect(manager.compactAgent(parent.id, { trigger: "auto" })).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof AgentCompactionRefusedError &&
           error.reason === "not_eligible" &&
@@ -787,7 +795,7 @@ describe("AgentManager.compactAgent", () => {
       await manager.archiveAgent(idleAcpChild.id);
 
       // 4. Descendant spawned while root awaits startTurn (simulating ensureQuery) is caught
-      //    synchronously by admitBeforeDispatch, refusing compaction and rolling back the run slot.
+      //    synchronously by admitBeforeDispatch, refusing auto compaction and rolling back the run slot.
       let lateChildId: string | null = null;
       onRootStartTurn = async () => {
         const lateChild = await manager.createAgent(
@@ -797,7 +805,7 @@ describe("AgentManager.compactAgent", () => {
         );
         lateChildId = lateChild.id;
       };
-      await expect(manager.compactAgent(parent.id)).rejects.toSatisfy(
+      await expect(manager.compactAgent(parent.id, { trigger: "auto" })).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof AgentCompactionRefusedError && error.reason === "not_eligible",
       );
@@ -806,9 +814,9 @@ describe("AgentManager.compactAgent", () => {
       expect(parentSession.prompts).toHaveLength(1);
       expect(manager.hasInFlightRun(parent.id)).toBe(false);
 
-      // Closing the late child allows compaction again.
+      // Closing the late child allows auto compaction again.
       await manager.closeAgent(lateChildId!);
-      const finalCompact = await manager.compactAgent(parent.id);
+      const finalCompact = await manager.compactAgent(parent.id, { trigger: "auto" });
       expect(finalCompact.contextTokensAfter).toBe(18_400);
       expect(parentSession.prompts).toHaveLength(2);
     } finally {
@@ -817,7 +825,7 @@ describe("AgentManager.compactAgent", () => {
     }
   });
 
-  test("refuses compaction when a direct child is closed but a grandchild is still live (including after reopening independently), and recovers once the grandchild closes", async () => {
+  test("auto compaction refuses when a direct child is closed but a grandchild is still live (including after reopening independently), and recovers once the grandchild closes", async () => {
     const rootDir = await createTempDir("paseo-compact-grandchild-");
     const agentsDir = path.join(rootDir, "agents");
     const logger = createTestLogger();
@@ -861,10 +869,10 @@ describe("AgentManager.compactAgent", () => {
       { workspaceId: "ws-1", labels: { [PARENT_AGENT_ID_LABEL]: otherRootX.id } },
     );
 
-    // Close direct child B while grandchild C remains live -> A must STILL be refused.
+    // Close direct child B while grandchild C remains live -> A must STILL be refused for auto.
     await manager1.closeAgent(childB.id);
     await manager1.closeAgent(otherRootX.id);
-    await expect(manager1.compactAgent(rootA.id)).rejects.toSatisfy(
+    await expect(manager1.compactAgent(rootA.id, { trigger: "auto" })).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof AgentCompactionRefusedError &&
         error.reason === "not_eligible" &&
@@ -915,8 +923,8 @@ describe("AgentManager.compactAgent", () => {
       });
       expect(manager2.getAgent(childB.id)).toBeNull();
 
-      // Even though B was never live in manager2, durable ancestry resolves C -> B -> A and refuses!
-      await expect(manager2.compactAgent(rootA.id)).rejects.toSatisfy(
+      // Even though B was never live in manager2, durable ancestry resolves C -> B -> A and refuses auto!
+      await expect(manager2.compactAgent(rootA.id, { trigger: "auto" })).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof AgentCompactionRefusedError &&
           error.reason === "not_eligible" &&
@@ -924,18 +932,18 @@ describe("AgentManager.compactAgent", () => {
       );
       expect(manager2.hasInFlightRun(rootA.id)).toBe(false);
 
-      // Closing grandchild C restores eligibility for root A (while unrelated Y -> closed X stays open!).
+      // Closing grandchild C restores auto eligibility for root A (while unrelated Y -> closed X stays open!).
       await manager2.closeAgent(grandchildC.id);
-      const recovered = await manager2.compactAgent(rootA.id);
+      const recovered = await manager2.compactAgent(rootA.id, { trigger: "auto" });
       expect(recovered.contextTokensAfter).toBe(18_400);
 
-      // Conservative fallback: a live agent whose parent cannot be resolved refuses compaction.
+      // Conservative fallback: a live agent whose parent cannot be resolved refuses auto compaction.
       const orphan = await manager2.createAgent(
         { provider: "claude", cwd: rootDir },
         randomUUID(),
         { workspaceId: "ws-1", labels: { [PARENT_AGENT_ID_LABEL]: "missing-parent-id" } },
       );
-      await expect(manager2.compactAgent(rootA.id)).rejects.toSatisfy(
+      await expect(manager2.compactAgent(rootA.id, { trigger: "auto" })).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof AgentCompactionRefusedError &&
           error.reason === "not_eligible" &&
@@ -1420,7 +1428,7 @@ describe("compact_agent MCP tool", () => {
     }
   });
 
-  test("refuses compact_agent via MCP when target has queued agent messages or pending finish subscriptions", async () => {
+  test("refuses compact_agent via MCP on queued agent messages but allows pending finish subscriptions", async () => {
     const claudeSession = new CompactTestSession("claude", {
       supportsCompaction: true,
     }).configureSupport();
@@ -1446,17 +1454,17 @@ describe("compact_agent MCP tool", () => {
       expect(queuedRes.isError).toBe(true);
       expect(JSON.stringify(queuedRes.content)).toContain("queued messages");
       pendingMessageIds.clear();
+      expect(claudeSession.prompts).toEqual([]);
 
+      // Pending finish subscriptions from live children no longer block manual compact_agent.
       pendingFinishCallerIds.add(target.id);
       const finishRes = await harness.mcpClient.callTool({
         name: "compact_agent",
         arguments: { agentId: target.id },
       });
-      expect(finishRes.isError).toBe(true);
-      expect(JSON.stringify(finishRes.content)).toContain("pending child notifications");
+      expect(finishRes.isError).not.toBe(true);
+      expect(claudeSession.prompts).toEqual(["/compact"]);
       pendingFinishCallerIds.clear();
-
-      expect(claudeSession.prompts).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -2654,6 +2662,523 @@ describe("OpenCodeV2Session compaction", () => {
       expect(h2.manager.hasInFlightRun(h2.agent.id)).toBe(false);
     } finally {
       await h2.cleanup();
+    }
+  });
+});
+
+describe("Manual compaction with live child sessions", () => {
+  test("allows manual compact_agent with live children and grandchildren without interrupting them, while auto stays conservative", async () => {
+    const root = await createTempDir("paseo-compact-live-children-");
+    const logger = createTestLogger();
+    const storage = new AgentStorage(path.join(root, "agents"), logger);
+    const sessions: CompactTestSession[] = [];
+    const manager = new AgentManager({
+      clients: {
+        claude: makeClient("claude", () => {
+          const s = new CompactTestSession("claude", {
+            supportsCompaction: true,
+          }).configureSupport();
+          sessions.push(s);
+          return s;
+        }),
+      },
+      registry: storage,
+      logger,
+    });
+
+    // Mirror bootstrap.ts: auto checks finishSubscriptions + agentMessages, manual checks agentMessages only.
+    const pendingFinishCallers = new Set<string>();
+    const pendingMessages = new Set<string>();
+    manager.setCompactionProtectionCheck((agentId, trigger) =>
+      trigger === "auto"
+        ? pendingFinishCallers.has(agentId) || pendingMessages.has(agentId)
+        : pendingMessages.has(agentId),
+    );
+
+    try {
+      const lead = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+        workspaceId: "ws-1",
+      });
+      const child = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+        workspaceId: "ws-1",
+        labels: { [PARENT_AGENT_ID_LABEL]: lead.id },
+      });
+      const grandchild = await manager.createAgent(
+        { provider: "claude", cwd: root },
+        randomUUID(),
+        {
+          workspaceId: "ws-1",
+          labels: { [PARENT_AGENT_ID_LABEL]: child.id },
+        },
+      );
+      const leadSession = sessions[0]!;
+      const childSession = sessions[1]!;
+      pendingFinishCallers.add(lead.id);
+
+      // Keep the child actively running a turn while the lead compacts manually.
+      const childStream = manager.streamAgent(child.id, "HOLD_TURN");
+      const childDraining = (async () => {
+        for await (const _ of childStream) {
+          // drain
+        }
+      })();
+      await vi.waitFor(() => {
+        expect(manager.getAgent(child.id)?.lifecycle).toBe("running");
+      });
+
+      // Idle auto-compaction stays conservative and refuses while descendants are live.
+      await expect(manager.compactAgent(lead.id, { trigger: "auto" })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof AgentCompactionRefusedError &&
+          error.reason === "not_eligible" &&
+          error.message.includes("live descendant agent"),
+      );
+      expect(leadSession.prompts).toEqual([]);
+
+      // Manual compaction succeeds on the idle lead without disturbing child or grandchild.
+      const result = await manager.compactAgent(lead.id, { trigger: "manual" });
+      expect(result.contextTokensAfter).toBe(18_400);
+      expect(result.status).toBe("idle");
+      expect(leadSession.prompts).toEqual(["/compact"]);
+      expect(manager.getAgent(child.id)?.lifecycle).toBe("running");
+      expect(manager.getAgent(grandchild.id)?.lifecycle).toBe("idle");
+
+      // Every other manual safeguard remains enforced even when children are live:
+      // 1) Already-queued messages on the lead refuse manual compaction.
+      pendingMessages.add(lead.id);
+      await expect(manager.compactAgent(lead.id, { trigger: "manual" })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof AgentCompactionRefusedError &&
+          error.reason === "not_eligible" &&
+          error.message.includes("queued messages"),
+      );
+      pendingMessages.clear();
+
+      // 2) Pending permissions on the lead refuse manual compaction.
+      leadSession.addPendingPermission({
+        id: "perm-lead-1",
+        provider: "claude",
+        name: "Bash",
+        kind: "tool",
+      });
+      await vi.waitFor(() => {
+        expect(manager.getPendingPermissions(lead.id)).toHaveLength(1);
+      });
+      await expect(manager.compactAgent(lead.id, { trigger: "manual" })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof AgentCompactionRefusedError && error.reason === "pending_permissions",
+      );
+      await manager.respondToPermission(lead.id, "perm-lead-1", { behavior: "allow" });
+      await vi.waitFor(() => {
+        expect(manager.getPendingPermissions(lead.id)).toHaveLength(0);
+      });
+
+      // 3) Root mid-turn refuses manual compaction.
+      const leadStream = manager.streamAgent(lead.id, "HOLD_TURN");
+      const leadDraining = (async () => {
+        for await (const _ of leadStream) {
+          // drain
+        }
+      })();
+      await vi.waitFor(() => {
+        expect(manager.getAgent(lead.id)?.lifecycle).toBe("running");
+      });
+      await expect(manager.compactAgent(lead.id, { trigger: "manual" })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof AgentCompactionRefusedError && error.reason === "mid_turn",
+      );
+      leadSession.finishHeldTurn();
+      await leadDraining;
+
+      childSession.finishHeldTurn();
+      await childDraining;
+    } finally {
+      await manager.flush();
+      await storage.flush();
+    }
+  });
+
+  test("requeues a live child's report arriving mid-compaction via typed AgentTurnBusyError and delivers it after compaction", async () => {
+    const root = await createTempDir("paseo-compact-child-report-");
+    const logger = createTestLogger();
+    const storage = new AgentStorage(path.join(root, "agents"), logger);
+    const compactHold = deferred<void>();
+    const compactStarted = deferred<void>();
+    const sessions: CompactTestSession[] = [];
+    const manager = new AgentManager({
+      clients: {
+        claude: makeClient("claude", () => {
+          const isLead = sessions.length === 0;
+          const s = new CompactTestSession("claude", {
+            supportsCompaction: true,
+            onPrompt: isLead
+              ? async (prompt, emit, turnId) => {
+                  if (prompt === "/compact") {
+                    emit({
+                      type: "timeline",
+                      provider: "claude",
+                      turnId,
+                      item: { type: "compaction", status: "loading" },
+                    });
+                    compactStarted.resolve();
+                    await compactHold.promise;
+                    emit({
+                      type: "timeline",
+                      provider: "claude",
+                      turnId,
+                      item: {
+                        type: "compaction",
+                        status: "completed",
+                        trigger: "manual",
+                        preTokens: 215_000,
+                      },
+                    });
+                    emit({
+                      type: "usage_updated",
+                      provider: "claude",
+                      turnId,
+                      usage: { contextWindowUsedTokens: 18_400, contextWindowMaxTokens: 200_000 },
+                    });
+                    emit({
+                      type: "turn_completed",
+                      provider: "claude",
+                      turnId,
+                      usage: { contextWindowUsedTokens: 18_400, contextWindowMaxTokens: 200_000 },
+                    });
+                    return;
+                  }
+                  emit({ type: "turn_completed", provider: "claude", turnId });
+                }
+              : undefined,
+          }).configureSupport();
+          sessions.push(s);
+          return s;
+        }),
+      },
+      registry: storage,
+      logger,
+    });
+
+    const lead = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+      workspaceId: "ws-1",
+    });
+    const child = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+      workspaceId: "ws-1",
+      labels: { [PARENT_AGENT_ID_LABEL]: lead.id },
+    });
+    const leadSession = sessions[0]!;
+    const childSession = sessions[1]!;
+
+    const deliveryErrors: unknown[] = [];
+    const busyErrorsObserved: AgentTurnBusyError[] = [];
+    const timers: Array<{ fn: () => void; canceled: boolean }> = [];
+    let forceDispatchRace = true;
+    const delivery = createAgentMessageDelivery({
+      schedule: (_delayMs, callback) => {
+        const entry = { fn: callback, canceled: false };
+        timers.push(entry);
+        return () => {
+          entry.canceled = true;
+        };
+      },
+      isRunning: (id) => (forceDispatchRace ? false : manager.hasInFlightRun(id)),
+      subscribe: (onStateChange) =>
+        manager.subscribe((event) => {
+          if (event.type === "agent_state") {
+            onStateChange(event.agent.id);
+          }
+        }),
+      dispatch: async (request) => {
+        try {
+          return (
+            await sendPreparedPromptToAgent({
+              agentManager: manager,
+              agentStorage: storage,
+              agentId: request.recipientId,
+              prompt: request.prompt,
+              logger,
+              idleOnly: request.idleOnly,
+              admit: request.admit,
+              onDispatch: request.onDispatch,
+              activeTurnBehavior: request.activeTurnBehavior,
+            })
+          ).disposition;
+        } catch (error) {
+          if (error instanceof AgentTurnBusyError) {
+            busyErrorsObserved.push(error);
+          }
+          throw error;
+        }
+      },
+      onError: (error) => {
+        deliveryErrors.push(error);
+      },
+    });
+
+    try {
+      // Child is actively running a turn.
+      const childStream = manager.streamAgent(child.id, "HOLD_TURN");
+      const childDraining = (async () => {
+        for await (const _ of childStream) {
+          // drain
+        }
+      })();
+      await vi.waitFor(() => {
+        expect(manager.getAgent(child.id)?.lifecycle).toBe("running");
+      });
+
+      // Start manual compaction on the lead while the child is live and running.
+      const compactPromise = manager.compactAgent(lead.id, { trigger: "manual" });
+      await compactStarted.promise;
+
+      // A concurrent second compact_agent on the lead must be refused as mid_turn.
+      await expect(manager.compactAgent(lead.id, { trigger: "manual" })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof AgentCompactionRefusedError && error.reason === "mid_turn",
+      );
+
+      // Mid-compaction, the live child sends a report back to the lead.
+      const childReportPrompt = `Report from live child ${child.id}: worker completed phase 1`;
+      const reportDelivery = delivery.enqueue({
+        recipientId: lead.id,
+        prompt: childReportPrompt,
+        activeTurnBehavior: "steer",
+      });
+
+      // Fire quiet-window timer while compaction holds the foreground run slot.
+      for (const t of timers.splice(0)) {
+        if (!t.canceled) t.fn();
+      }
+      await vi.waitFor(() => {
+        expect(busyErrorsObserved).toHaveLength(1);
+      });
+      // Typed AgentTurnBusyError was caught and requeued (not reported as a fatal delivery error or dropped).
+      expect(deliveryErrors).toEqual([]);
+      expect(delivery.hasPending(lead.id)).toBe(true);
+      expect(leadSession.prompts).toEqual(["/compact"]);
+
+      // Complete compaction; the requeued child report must deliver immediately afterward.
+      forceDispatchRace = false;
+      compactHold.resolve();
+      const compactResult = await compactPromise;
+      expect(compactResult.contextTokensAfter).toBe(18_400);
+
+      for (const t of timers.splice(0)) {
+        if (!t.canceled) t.fn();
+      }
+      await vi.waitFor(() => {
+        expect(leadSession.prompts).toEqual(["/compact", childReportPrompt]);
+      });
+      await expect(reportDelivery.dispatched).resolves.toBe("turn_started");
+      expect(deliveryErrors).toEqual([]);
+      expect(manager.getAgent(child.id)?.lifecycle).toBe("running");
+
+      childSession.finishHeldTurn();
+      await childDraining;
+    } finally {
+      await delivery.close();
+      await manager.flush();
+      await storage.flush();
+    }
+  });
+
+  test("delivers a real createFinishSubscriptions child-finish notification after manual compaction via AgentTurnBusyError requeue", async () => {
+    const root = await createTempDir("paseo-compact-finish-sub-");
+    const logger = createTestLogger();
+    const storage = new AgentStorage(path.join(root, "agents"), logger);
+    const compactStarted = deferred<void>();
+    const compactHold = deferred<void>();
+    const sessions: CompactTestSession[] = [];
+    const manager = new AgentManager({
+      clients: {
+        claude: makeClient("claude", () => {
+          const isLead = sessions.length === 0;
+          const s = new CompactTestSession("claude", {
+            supportsCompaction: true,
+            onPrompt: isLead
+              ? async (prompt, emit, turnId) => {
+                  if (prompt === "/compact") {
+                    emit({
+                      type: "timeline",
+                      provider: "claude",
+                      turnId,
+                      item: { type: "compaction", status: "loading" },
+                    });
+                    compactStarted.resolve();
+                    await compactHold.promise;
+                    emit({
+                      type: "timeline",
+                      provider: "claude",
+                      turnId,
+                      item: {
+                        type: "compaction",
+                        status: "completed",
+                        trigger: "manual",
+                        preTokens: 215_000,
+                      },
+                    });
+                    emit({
+                      type: "usage_updated",
+                      provider: "claude",
+                      turnId,
+                      usage: { contextWindowUsedTokens: 18_400, contextWindowMaxTokens: 200_000 },
+                    });
+                    emit({
+                      type: "turn_completed",
+                      provider: "claude",
+                      turnId,
+                      usage: { contextWindowUsedTokens: 18_400, contextWindowMaxTokens: 200_000 },
+                    });
+                    return;
+                  }
+                  emit({ type: "turn_completed", provider: "claude", turnId });
+                }
+              : undefined,
+          }).configureSupport();
+          sessions.push(s);
+          return s;
+        }),
+      },
+      registry: storage,
+      logger,
+    });
+
+    const lead = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+      workspaceId: "ws-1",
+    });
+    const child = await manager.createAgent({ provider: "claude", cwd: root }, randomUUID(), {
+      workspaceId: "ws-1",
+      labels: { [PARENT_AGENT_ID_LABEL]: lead.id },
+    });
+    const leadSession = sessions[0]!;
+
+    const deliveryErrors: unknown[] = [];
+    const busyErrorsObserved: AgentTurnBusyError[] = [];
+    const timers: Array<{ fn: () => void; canceled: boolean }> = [];
+    let forceDispatchRace = true;
+    const delivery = createAgentMessageDelivery({
+      schedule: (_delayMs, callback) => {
+        const entry = { fn: callback, canceled: false };
+        timers.push(entry);
+        return () => {
+          entry.canceled = true;
+        };
+      },
+      isRunning: (id) => (forceDispatchRace ? false : manager.hasInFlightRun(id)),
+      subscribe: (onStateChange) =>
+        manager.subscribe((event) => {
+          if (event.type === "agent_state") onStateChange(event.agent.id);
+        }),
+      dispatch: async (request) => {
+        try {
+          return (
+            await sendPreparedPromptToAgent({
+              agentManager: manager,
+              agentStorage: storage,
+              agentId: request.recipientId,
+              prompt: request.prompt,
+              logger,
+              idleOnly: request.idleOnly,
+              admit: request.admit,
+              onDispatch: request.onDispatch,
+              activeTurnBehavior: request.activeTurnBehavior,
+            })
+          ).disposition;
+        } catch (error) {
+          if (error instanceof AgentTurnBusyError) busyErrorsObserved.push(error);
+          throw error;
+        }
+      },
+      onError: (error) => deliveryErrors.push(error),
+    });
+
+    const records = new Map<string, FinishSubscription>();
+    const childFinished = deferred<{
+      status: "idle";
+      final: null;
+      lastMessage: string;
+      error: null;
+    }>();
+    const finishSubscriptions = createFinishSubscriptions({
+      store: {
+        list: async () => Array.from(records.values()),
+        put: async (record) => {
+          records.set(record.id, record);
+        },
+        remove: async (id) => {
+          records.delete(id);
+        },
+      },
+      messages: () => delivery,
+      callerIsActive: async (agentId) => manager.getAgent(agentId) !== null,
+      serverId: "srv-test",
+      logger,
+      open: async () => ({
+        next: () => childFinished.promise,
+        close: async () => {},
+      }),
+    });
+
+    manager.setCompactionProtectionCheck((agentId, trigger) =>
+      trigger === "auto"
+        ? finishSubscriptions.hasPendingForCaller(agentId) || delivery.hasPending(agentId)
+        : delivery.hasPending(agentId),
+    );
+
+    try {
+      await finishSubscriptions.start();
+      const registration = await finishSubscriptions.register({
+        callerAgentId: lead.id,
+        childAgentId: child.id,
+      });
+      registration.accept();
+      expect(finishSubscriptions.hasPendingForCaller(lead.id)).toBe(true);
+
+      // Start manual compaction on lead despite live child + real pending finish subscription.
+      const compactPromise = manager.compactAgent(lead.id, { trigger: "manual" });
+      await compactStarted.promise;
+
+      // Child finishes mid-compaction -> real finishSubscriptions enqueues finish notification.
+      childFinished.resolve({
+        status: "idle",
+        final: null,
+        lastMessage: "Worker finished phase 1",
+        error: null,
+      });
+      await vi.waitFor(() => {
+        expect(delivery.hasPending(lead.id)).toBe(true);
+      });
+
+      // Fire delivery timer while compaction holds the foreground run slot -> hits AgentTurnBusyError & requeues.
+      for (const t of timers.splice(0)) if (!t.canceled) t.fn();
+      await vi.waitFor(() => {
+        expect(busyErrorsObserved).toHaveLength(1);
+      });
+      expect(deliveryErrors).toEqual([]);
+      expect(leadSession.prompts).toEqual(["/compact"]);
+
+      // Release compaction -> requeued real finish notification delivers to lead!
+      forceDispatchRace = false;
+      compactHold.resolve();
+      const compactResult = await compactPromise;
+      expect(compactResult.contextTokensAfter).toBe(18_400);
+
+      for (const t of timers.splice(0)) if (!t.canceled) t.fn();
+      await vi.waitFor(() => {
+        expect(leadSession.prompts).toHaveLength(2);
+      });
+      expect(leadSession.prompts[0]).toBe("/compact");
+      expect(String(leadSession.prompts[1])).toContain("Worker finished phase 1");
+      expect(String(leadSession.prompts[1])).toContain(child.id);
+      await vi.waitFor(() => {
+        expect(finishSubscriptions.hasPendingForCaller(lead.id)).toBe(false);
+      });
+      expect(deliveryErrors).toEqual([]);
+    } finally {
+      await finishSubscriptions.close();
+      await delivery.close();
+      await manager.flush();
+      await storage.flush();
     }
   });
 });

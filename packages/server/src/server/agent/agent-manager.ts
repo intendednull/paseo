@@ -1018,7 +1018,8 @@ export class AgentManager {
   >();
   private readonly collectingRuntimes = new Set<string>();
   private compactionAdmitRun: { agentId: string; token: string } | null = null;
-  private compactionProtectionCheck: (agentId: string) => boolean = () => false;
+  private compactionProtectionCheck: (agentId: string, trigger: "manual" | "auto") => boolean =
+    () => false;
   private readonly knownParentIds = new Map<string, string | null>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
   private readonly pendingCancellations = new Map<string, Promise<unknown>>();
@@ -1143,7 +1144,9 @@ export class AgentManager {
     this.acceptingAgentRegistrations = false;
   }
 
-  setCompactionProtectionCheck(check: (agentId: string) => boolean): void {
+  setCompactionProtectionCheck(
+    check: (agentId: string, trigger: "manual" | "auto") => boolean,
+  ): void {
     this.compactionProtectionCheck = check;
   }
 
@@ -3567,21 +3570,27 @@ export class AgentManager {
         `Cannot compact agent ${agent.id}: agent has active background work`,
       );
     }
-    const descendantBlocker = this.findLiveDescendantBlockerSync(agent);
-    if (descendantBlocker) {
+    if (options.trigger === "auto") {
+      const descendantBlocker = this.findLiveDescendantBlockerSync(agent);
+      if (descendantBlocker) {
+        const detail =
+          descendantBlocker.reason === "live_descendant"
+            ? `live descendant agent ${descendantBlocker.agentId} is still open`
+            : `cannot verify ancestry of live agent ${descendantBlocker.agentId}`;
+        throw new AgentCompactionRefusedError(
+          "not_eligible",
+          `Cannot compact agent ${agent.id}: ${detail}`,
+        );
+      }
+    }
+    if (options.isProtected(agent.id)) {
       const detail =
-        descendantBlocker.reason === "live_descendant"
-          ? `live descendant agent ${descendantBlocker.agentId} is still open`
-          : `cannot verify ancestry of live agent ${descendantBlocker.agentId}`;
+        options.trigger === "auto"
+          ? "agent has queued messages or pending child notifications"
+          : "agent has queued messages";
       throw new AgentCompactionRefusedError(
         "not_eligible",
         `Cannot compact agent ${agent.id}: ${detail}`,
-      );
-    }
-    if (options.isProtected(agent.id)) {
-      throw new AgentCompactionRefusedError(
-        "not_eligible",
-        `Cannot compact agent ${agent.id}: agent has queued messages or pending child notifications`,
       );
     }
     if (options.admit && !options.admit()) {
@@ -3721,7 +3730,7 @@ export class AgentManager {
     const trigger = options?.trigger ?? "manual";
     const instructions = options?.instructions?.trim() || undefined;
     const isProtected = (id: string) =>
-      this.compactionProtectionCheck(id) || (options?.isProtected?.(id) ?? false);
+      this.compactionProtectionCheck(id, trigger) || (options?.isProtected?.(id) ?? false);
 
     if (this.registry && !this.registry.isLoaded()) {
       await this.registry.initialize();
