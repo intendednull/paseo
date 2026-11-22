@@ -47,6 +47,7 @@ The commit trailers are authoritative; this is the summary.
 | fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json   |
 | feat(server): add compact_agent MCP tool                 | upstream ships a remote compaction MCP tool (#8708)     |
 | feat(server): auto-compact idle agents before cache TTL  | upstream ships per-provider idle auto-compaction        |
+| fix(server): forward supportsCompaction in wrapper       | upstream forwards supportsCompaction in provider wrap   |
 
 ## Branches
 

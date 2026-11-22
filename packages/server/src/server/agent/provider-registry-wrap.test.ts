@@ -139,6 +139,11 @@ class FakeSession implements AgentSession {
     this.recordedCalls.push("close");
   }
 
+  supportsCompaction() {
+    this.recordedCalls.push("supportsCompaction");
+    return true;
+  }
+
   async listCommands() {
     this.recordedCalls.push("listCommands");
     return [];
@@ -190,6 +195,7 @@ describe("wrapSessionProvider", () => {
     const wrapped = wrapSessionProvider("custom-claude", session);
 
     await wrapped.steerActiveTurn?.("follow-up", { expectedTurnId: "turn-1" });
+    expect(wrapped.supportsCompaction?.()).toBe(true);
     await wrapped.listCommands?.();
     await wrapped.setModel?.("sonnet");
     await wrapped.setThinkingOption?.("high");
@@ -205,6 +211,7 @@ describe("wrapSessionProvider", () => {
     ]);
     expect(session.recordedCalls).toEqual([
       "steerActiveTurn",
+      "supportsCompaction",
       "listCommands",
       "setModel",
       "setThinkingOption",
@@ -241,9 +248,12 @@ describe("wrapSessionProvider", () => {
     expect(session.recordedCalls).toEqual([]);
   });
 
-  test("leaves steering unavailable when the provider has no implementation", () => {
+  test("leaves steering and compaction unavailable when the provider has no implementation", () => {
     const session: AgentSession = new FakeSession();
     session.steerActiveTurn = undefined;
-    expect(wrapSessionProvider("custom-claude", session).steerActiveTurn).toBeUndefined();
+    session.supportsCompaction = undefined;
+    const wrapped = wrapSessionProvider("custom-claude", session);
+    expect(wrapped.steerActiveTurn).toBeUndefined();
+    expect(wrapped.supportsCompaction).toBeUndefined();
   });
 });
