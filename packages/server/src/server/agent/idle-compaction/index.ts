@@ -25,10 +25,11 @@ export interface ResolvedProviderIdleCompactionPolicy {
 /**
  * Default per-provider idle compaction settings.
  *
- * Only Claude is enabled by default, mirroring Claude Code's verified policy
- * (54 min trigger before the 60 min prompt-cache window, 200k min context tokens).
- * Other providers are disabled by default and opt-in under `providers.<id>` so
- * operators can configure thresholds matching their backend's actual cache TTL.
+ * Only Claude is enabled by default (54 min trigger before the 60 min
+ * prompt-cache window), paired with the operator's chosen 400k minimum
+ * context floor in `DEFAULT_IDLE_COMPACTION_SETTINGS`. Other providers are
+ * disabled by default and opt-in under `providers.<id>` so operators can
+ * configure thresholds matching their backend's actual cache TTL.
  */
 export const DEFAULT_IDLE_COMPACTION_PROVIDERS: Readonly<
   Record<
@@ -42,12 +43,12 @@ export const DEFAULT_IDLE_COMPACTION_PROVIDERS: Readonly<
 });
 
 /**
- * Mirrors Claude Code's minimum context size default (200k tokens) with
+ * Operator's chosen default minimum context floor (400k tokens), paired with
  * per-provider idle thresholds in `DEFAULT_IDLE_COMPACTION_PROVIDERS`.
  */
 export const DEFAULT_IDLE_COMPACTION_SETTINGS: Readonly<IdleCompactionSettings> = Object.freeze({
   enabled: true,
-  minContextTokens: 200_000,
+  minContextTokens: 400_000,
 });
 
 export interface IdleCompactionOutcome {

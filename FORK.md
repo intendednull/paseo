@@ -51,6 +51,7 @@ The commit trailers are authoritative; this is the summary.
 | fix(server): harden ACP safety and compaction plumbing   | upstream forwards compaction flags and ACP safety checks |
 | feat(server): support compact_agent for Codex & OpenCode | upstream ships multi-provider compact_agent (#8708)      |
 | feat(server): allow manual compact_agent with children   | upstream allows manual compaction with live children     |
+| feat(server): raise idle auto-compaction minimum to 400k | upstream ships per-provider idle auto-compaction         |
 
 ## Branches
 
