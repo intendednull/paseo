@@ -204,10 +204,23 @@ export class V2Timeline {
     message: Extract<SessionMessageInfo, { type: "compaction" }>,
     push: (item: AgentTimelineItem) => void,
   ) {
+    if (message.status === "failed") {
+      if (this.content.get(message.id) === "loading") {
+        this.content.set(message.id, "failed");
+        push({ type: "compaction", status: "completed" });
+      } else {
+        this.content.set(message.id, "failed");
+      }
+      return;
+    }
     const status = message.status === "running" ? "loading" : "completed";
     if (this.content.get(message.id) === status) return;
     this.content.set(message.id, status);
-    push({ type: "compaction", status });
+    push({
+      type: "compaction",
+      status,
+      ...(status === "completed" ? { trigger: message.reason } : {}),
+    });
   }
 }
 

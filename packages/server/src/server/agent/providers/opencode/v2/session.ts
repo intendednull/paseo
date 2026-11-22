@@ -12,17 +12,18 @@ import type { SessionInfo, SessionMessageInfo } from "@opencode/client";
 
 import { setTimeout as delay } from "node:timers/promises";
 import type { Logger } from "pino";
-import type {
-  AgentMode,
-  AgentPermissionResponse,
-  AgentPersistenceHandle,
-  AgentPromptInput,
-  AgentRunOptions,
-  AgentSession,
-  AgentSessionConfig,
-  AgentStreamEvent,
-  SteerActiveTurnOptions,
-  SteerResult,
+import {
+  AgentCompactionAdmitError,
+  type AgentMode,
+  type AgentPermissionResponse,
+  type AgentPersistenceHandle,
+  type AgentPromptInput,
+  type AgentRunOptions,
+  type AgentSession,
+  type AgentSessionConfig,
+  type AgentStreamEvent,
+  type SteerActiveTurnOptions,
+  type SteerResult,
 } from "../../../agent-sdk-types.js";
 
 import { toDiagnosticErrorMessage } from "../../diagnostic-utils.js";
@@ -45,6 +46,7 @@ import { SessionUsage } from "./usage.js";
 export class OpenCodeV2Session implements AgentSession {
   readonly provider = "opencode";
   readonly capabilities = V2_CAPABILITIES;
+  readonly supportsCompactionInstructions = false;
   private readonly listeners = new Set<(event: AgentStreamEvent) => void>();
   private readonly timeline = new V2Timeline();
   private readonly abort = new AbortController();
@@ -76,6 +78,7 @@ export class OpenCodeV2Session implements AgentSession {
     private readonly acquire?: () => Promise<V2Connection>,
     private readonly moved?: (connection: V2Connection) => void,
     private readonly historyOnly = false,
+    compactionTimeoutMs?: number,
   ) {
     this.background = new OpenCodeBackgroundInventory({
       id: info.id,
@@ -123,6 +126,7 @@ export class OpenCodeV2Session implements AgentSession {
               "The user answered with a message instead of approving. Their message follows.",
           });
       },
+      compactionTimeoutMs,
     });
     this.usage = new SessionUsage({
       client: () => this.client,
@@ -263,6 +267,7 @@ export class OpenCodeV2Session implements AgentSession {
       await next.release();
       throw error;
     }
+    this.turns.clearQuarantine();
     this.moved?.(next);
     await old.release();
   }
@@ -446,7 +451,123 @@ export class OpenCodeV2Session implements AgentSession {
         item.type === "assistant_message" ? current + item.text : current,
     });
   }
+  supportsCompaction(): boolean {
+    return !this.closed && !this.historyOnly;
+  }
+
+  isCompactionQuarantined(): boolean {
+    return this.turns.isCompactionQuarantined;
+  }
+  private isLocallySafeForCompaction(): boolean {
+    return (
+      !this.closed &&
+      !this.historyOnly &&
+      !this.exited &&
+      !this.reconnecting &&
+      !this.turns.isBusy &&
+      !this.dirty &&
+      this.permissions.list().length === 0
+    );
+  }
+  private async readLatestDurableSeq(signal: AbortSignal): Promise<number> {
+    let latest = this.turns.lastSequence;
+    for await (const event of this.client.session.log(
+      { sessionID: this.id, follow: false, after: latest },
+      { signal },
+    )) {
+      if ("durable" in event && event.durable.seq > latest) {
+        latest = event.durable.seq;
+      }
+    }
+    return latest;
+  }
+  private async checkRemoteRuntimeSafe(options?: {
+    checkRunningCompaction?: boolean;
+  }): Promise<boolean> {
+    const request = { signal: AbortSignal.timeout(10_000) };
+    // Active executions are server-wide. Releasing the last lease or compacting
+    // must not proceed while an autonomous execution is running on this server.
+    if (Object.keys(await this.client.session.active(request)).length > 0) return false;
+    const family = new Map([[this.info.id, this.info]]);
+    const directories = new Set<string>();
+    for (const info of family.values()) {
+      if ((await this.client.session.inbox.list({ sessionID: info.id }, request)).length)
+        return false;
+      const [perms, forms] = await Promise.all([
+        this.client.permission.list({ sessionID: info.id }, request),
+        this.client.session.form.list({ sessionID: info.id }, request),
+      ]);
+      if (perms.length > 0 || forms.length > 0) return false;
+      directories.add(info.location.directory);
+      let cursor: string | undefined;
+      do {
+        const page = await this.client.session.list(
+          { ...(cursor ? { cursor } : { parentID: info.id }), limit: 100 },
+          request,
+        );
+        for (const child of page.data) family.set(child.id, child);
+        cursor = page.cursor.next ?? undefined;
+      } while (cursor);
+    }
+    for (const directory of directories) {
+      const shells = await this.client.shell.list({ location: { directory } }, request);
+      if (shells.data.some((shell) => shell.status === "running")) return false;
+    }
+    if (options?.checkRunningCompaction) {
+      const currentMessages = await messages(this.client, this.id);
+      if (
+        currentMessages.some(
+          (message) => message.type === "compaction" && message.status === "running",
+        )
+      ) {
+        return false;
+      }
+    }
+    return this.isLocallySafeForCompaction();
+  }
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions) {
+    if (options?.admitBeforeDispatch) {
+      const admitBeforeDispatch = options.admitBeforeDispatch;
+      const command =
+        typeof prompt === "string" ? prompt.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/) : null;
+      if (command?.[1] !== "compact") {
+        throw new AgentCompactionAdmitError("OpenCode compaction requires the /compact command");
+      }
+      if (command[2]?.trim()) {
+        throw new AgentCompactionAdmitError(
+          "Compaction instructions are not supported for opencode",
+        );
+      }
+      if (!this.isLocallySafeForCompaction() || admitBeforeDispatch() !== true) {
+        throw new AgentCompactionAdmitError("OpenCode session is no longer idle for compaction");
+      }
+      if (this.refreshTimer) {
+        clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+        await this.reconcile();
+      }
+      await this.connection.bindSession(this.id, this.config.cwd);
+      const baselineSeq = await this.readLatestDurableSeq(AbortSignal.timeout(10_000)).catch(
+        () => null,
+      );
+      if (baselineSeq === null) {
+        throw new AgentCompactionAdmitError("OpenCode session log probe failed before compaction");
+      }
+      const remoteSafe = await this.checkRemoteRuntimeSafe({ checkRunningCompaction: true }).catch(
+        () => false,
+      );
+      if (!remoteSafe || this.refreshTimer !== null) {
+        throw new AgentCompactionAdmitError("OpenCode remote runtime reported active work");
+      }
+      // Zero awaits between the remote probe above and synchronous admission + session.compact().
+      return this.turns.startCompactionTurn(
+        () =>
+          this.refreshTimer === null &&
+          this.isLocallySafeForCompaction() &&
+          admitBeforeDispatch() === true,
+        baselineSeq,
+      );
+    }
     await this.reconnectIfExited();
     await this.connection.bindSession(this.id, this.config.cwd);
     return this.turns.startTurn(prompt, options);
@@ -592,33 +713,8 @@ export class OpenCodeV2Session implements AgentSession {
     }
   }
   async canStopRuntime(): Promise<boolean> {
-    if (this.closed || this.exited || this.reconnecting || this.turns.id || this.dirty)
-      return false;
-    const request = { signal: AbortSignal.timeout(10_000) };
-    // Active executions are server-wide. Releasing the last lease must not stop an
-    // autonomous execution merely because it belongs to another session or location.
-    if (Object.keys(await this.client.session.active(request)).length > 0) return false;
-    const family = new Map([[this.info.id, this.info]]);
-    const directories = new Set<string>();
-    for (const info of family.values()) {
-      if ((await this.client.session.inbox.list({ sessionID: info.id }, request)).length)
-        return false;
-      directories.add(info.location.directory);
-      let cursor: string | undefined;
-      do {
-        const page = await this.client.session.list(
-          { ...(cursor ? { cursor } : { parentID: info.id }), limit: 100 },
-          request,
-        );
-        for (const child of page.data) family.set(child.id, child);
-        cursor = page.cursor.next ?? undefined;
-      } while (cursor);
-    }
-    for (const directory of directories) {
-      const shells = await this.client.shell.list({ location: { directory } }, request);
-      if (shells.data.some((shell) => shell.status === "running")) return false;
-    }
-    return !this.turns.id && !this.dirty;
+    if (!this.isLocallySafeForCompaction()) return false;
+    return this.checkRemoteRuntimeSafe();
   }
 
   async close() {

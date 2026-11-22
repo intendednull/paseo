@@ -3,6 +3,8 @@ import { applyProviderOptionsPatch } from "../option-controls.js";
 import { assertChangesAreLive, validateProviderOptions } from "../provider-options.js";
 import { CodexBackgroundInventory } from "./codex/background-inventory.js";
 import {
+  AgentCompactionAdmitError,
+  AgentTurnBusyError,
   AgentTurnStartCanceledError,
   getAgentStreamEventTurnId,
   type AgentPermissionAction,
@@ -158,6 +160,8 @@ function isCodexAlreadyUnarchivedError(error: unknown, threadId: string): boolea
 }
 
 const TURN_START_TIMEOUT_MS = 90 * 1000;
+const CODEX_COMPACTION_RPC_TIMEOUT_MS = 30 * 1000;
+const CODEX_COMPACTION_TIMEOUT_MS = 180 * 1000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
 // `turn/interrupt` ends a turn but leaves the shell commands it started running.
 // Each terminate is bounded by the first constant. A turn start waits for the
@@ -343,6 +347,8 @@ interface CodexAppServerAgentDeps {
   resolveSlashCommandInvocation?: (
     prompt: AgentPromptInput,
   ) => Promise<{ commandName: string; args?: string } | null>;
+  compactionTimeoutMs?: number;
+  compactionRpcTimeoutMs?: number;
 }
 
 interface CodexModePreset {
@@ -2407,6 +2413,7 @@ const TurnDiffUpdatedNotificationSchema = z
 const ThreadTokenUsageUpdatedNotificationSchema = z
   .object({
     threadId: z.string().optional(),
+    turnId: z.string().optional(),
     tokenUsage: z.unknown(),
   })
   .passthrough();
@@ -2661,6 +2668,8 @@ type ParsedCodexNotification =
   | { kind: "turn_started"; turnId: string; threadId: string | null }
   | {
       kind: "turn_completed";
+      source: "turn" | "codex_event";
+      turnId: string | null;
       status: string;
       errorMessage: string | null;
       threadId: string | null;
@@ -2679,7 +2688,12 @@ type ParsedCodexNotification =
       threadId: string | null;
     }
   | { kind: "diff_updated"; diff: string; threadId: string | null }
-  | { kind: "token_usage_updated"; tokenUsage: unknown; threadId: string | null }
+  | {
+      kind: "token_usage_updated";
+      tokenUsage: unknown;
+      threadId: string | null;
+      turnId: string | null;
+    }
   | { kind: "agent_message_delta"; itemId: string; delta: string; threadId: string | null }
   | { kind: "reasoning_delta"; itemId: string; delta: string; threadId: string | null }
   | {
@@ -2821,6 +2835,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "turn",
+        turnId: params.turn.id ?? null,
         status: params.turn.status,
         errorMessage: params.turn.error?.message ?? null,
         threadId: params.threadId ?? null,
@@ -2908,6 +2924,7 @@ const CodexNotificationSchema = z.union([
         kind: "token_usage_updated",
         tokenUsage: params.tokenUsage,
         threadId: params.threadId ?? null,
+        turnId: params.turnId ?? null,
       }),
     ),
   z.object({ method: z.literal("thread/tokenUsage/updated"), params: z.unknown() }).transform(
@@ -3275,6 +3292,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "codex_event",
+        turnId: null,
         status: "interrupted",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3295,6 +3314,8 @@ const CodexNotificationSchema = z.union([
     .transform(
       ({ params }): ParsedCodexNotification => ({
         kind: "turn_completed",
+        source: "codex_event",
+        turnId: null,
         status: "completed",
         errorMessage: null,
         threadId: getCodexEventThreadId(params),
@@ -3705,6 +3726,22 @@ export class CodexAppServerAgentSession implements AgentSession {
   // `thread/compacted` and a completed `contextCompaction` item.
   private unpairedCompactionNotificationCompletions = 0;
   private unpairedCompactionItemCompletions = 0;
+  private activeCompaction: {
+    foregroundTurnId: string;
+    threadId: string;
+    nativeTurnId: string | null;
+    compactionItemIds: Set<string>;
+    sawCompactionStarted: boolean;
+    sawCompactionCompleted: boolean;
+    sawLoadingItem: boolean;
+    timedOut: boolean;
+    tearingDown: boolean;
+    postCompactionUsage: AgentUsage | undefined;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null = null;
+  // Set when uncorrelated compaction ambiguity cannot be cleared by process teardown;
+  // blocks all normal turns (with AgentTurnBusyError), steering, compaction, and stopping.
+  private compactionQuarantined = false;
   private connectionState: "disconnected" | "history-ready" | "connected" = "disconnected";
   private connectionPromise: Promise<void> | null = null;
   private readonly startupAbort = new AbortController();
@@ -3951,7 +3988,22 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleUnexpectedTermination(error: Error): void {
     this.connectionState = "disconnected";
     this.background.stop();
-    const hasActiveRootTurn = this.activeForegroundTurnId !== null || this.currentTurnId !== null;
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      this.clearActiveCompactionTimer(compaction);
+      this.activeCompaction = null;
+      if (compaction.sawLoadingItem && !compaction.sawCompactionCompleted) {
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "compaction", status: "completed" },
+          turnId: compaction.foregroundTurnId,
+        });
+      }
+    }
+    this.compactionQuarantined = false;
+    const hasActiveRootTurn =
+      this.activeForegroundTurnId !== null || this.currentTurnId !== null || compaction !== null;
     this.clearPendingPermissions({ preservePlanApprovals: !hasActiveRootTurn });
     if (hasActiveRootTurn) {
       this.settleStreamRetry({ status: "failed", error: error.message });
@@ -3959,6 +4011,7 @@ export class CodexAppServerAgentSession implements AgentSession {
         type: "turn_failed",
         provider: CODEX_PROVIDER,
         error: error.message,
+        ...(compaction ? { turnId: compaction.foregroundTurnId } : {}),
       });
     }
     this.activeForegroundTurnId = null;
@@ -4643,12 +4696,347 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
+  readonly supportsCompactionInstructions = false;
+
+  supportsCompaction(): boolean {
+    return !this.closed && this.connectionState !== "history-ready";
+  }
+
+  isCompactionQuarantined(): boolean {
+    return this.compactionQuarantined;
+  }
+
+  private clearActiveCompactionTimer(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+  ): void {
+    if (compaction.timer !== null) {
+      clearTimeout(compaction.timer);
+      compaction.timer = null;
+    }
+  }
+
+  private isCompactionLocallySafeSync(
+    allowedPendingStart?: CodexAppServerAgentSession["pendingForegroundStart"],
+  ): boolean {
+    const foreignPendingStart =
+      this.pendingForegroundStart !== null && this.pendingForegroundStart !== allowedPendingStart;
+    return (
+      !this.closed &&
+      this.connectionState === "connected" &&
+      this.client !== null &&
+      !this.client.hasPendingRequests() &&
+      this.currentThreadId !== null &&
+      this.activeForegroundTurnId === null &&
+      this.currentTurnId === null &&
+      !foreignPendingStart &&
+      this.activeCompaction === null &&
+      !this.compactionQuarantined &&
+      this.pendingManualCompactionStarts === 0 &&
+      this.pendingRootCompactionItemIds.size === 0 &&
+      this.pendingAnonymousRootCompactions === 0 &&
+      this.interruptedTurnCleanup === null &&
+      this.pendingPermissionHandlers.size === 0 &&
+      this.getPendingPermissions().length === 0 &&
+      this.pendingSubAgentNotificationsByThreadId.size === 0
+    );
+  }
+
+  private async isRootThreadIdleForCompaction(): Promise<boolean> {
+    if (!this.client || !this.currentThreadId) return false;
+    try {
+      const response = toObjectRecord(
+        await this.client.request(
+          "thread/read",
+          { threadId: this.currentThreadId, includeTurns: false },
+          this.deps.compactionRpcTimeoutMs ?? CODEX_COMPACTION_RPC_TIMEOUT_MS,
+        ),
+      );
+      const thread = toObjectRecord(response?.thread);
+      const status = thread?.status;
+      if (status === "idle") return true;
+      return toObjectRecord(status)?.type === "idle";
+    } catch {
+      return false;
+    }
+  }
+
+  private async isGoalInactiveForCompaction(): Promise<boolean> {
+    if (!this.client || !this.currentThreadId) return false;
+    try {
+      const response = toObjectRecord(
+        await this.client.request(
+          "thread/goal/get",
+          { threadId: this.currentThreadId },
+          this.deps.compactionRpcTimeoutMs ?? CODEX_COMPACTION_RPC_TIMEOUT_MS,
+        ),
+      );
+      if (!response) return false;
+      const goal = response.goal;
+      if (goal === null || goal === undefined) return true;
+      const goalRecord = toObjectRecord(goal);
+      if (!goalRecord || typeof goalRecord.status !== "string") return false;
+      return goalRecord.status !== "active";
+    } catch (error) {
+      if (error instanceof CodexAppServerRpcError && error.code === -32601 && !this.goalsEnabled) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  private async terminateAmbiguousCompaction(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+    errorMessage: string,
+  ): Promise<void> {
+    if (this.activeCompaction !== compaction || compaction.tearingDown) {
+      return;
+    }
+    compaction.tearingDown = true;
+    this.clearActiveCompactionTimer(compaction);
+    this.pendingForegroundTurnIdentification?.resolve(null);
+    this.pendingForegroundTurnIdentification = null;
+    // Quarantine immediately while teardown kills the app-server process so no
+    // normal turn can slip through. Only clear quarantine if process exit succeeds.
+    if (!this.closed) {
+      this.compactionQuarantined = true;
+    }
+    let disposedCleanly = false;
+    try {
+      await this.disposeClient();
+      disposedCleanly = true;
+    } catch (disposeError) {
+      this.logger.warn(
+        { err: disposeError, agentId: this.agentId, threadId: compaction.threadId },
+        "Failed to terminate Codex app-server after ambiguous compaction; keeping session quarantined",
+      );
+    }
+    if (this.activeCompaction === compaction) {
+      this.activeCompaction = null;
+    }
+    if (disposedCleanly) {
+      this.compactionQuarantined = false;
+    }
+    if (compaction.sawLoadingItem && !compaction.sawCompactionCompleted) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "compaction", status: "completed" },
+        turnId: compaction.foregroundTurnId,
+      });
+    }
+    this.activeForegroundTurnId = null;
+    this.activeClientMessageId = null;
+    this.currentTurnId = null;
+    this.emitEvent({
+      type: "turn_failed",
+      provider: CODEX_PROVIDER,
+      error: errorMessage,
+      turnId: compaction.foregroundTurnId,
+    });
+  }
+
+  private handleCompactionTimeout(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+  ): void {
+    if (this.activeCompaction !== compaction || compaction.tearingDown) {
+      return;
+    }
+    compaction.timer = null;
+    compaction.timedOut = true;
+    if (compaction.nativeTurnId !== null) {
+      // The provider acknowledged the compaction turn via turn/started. Do not release
+      // the foreground run slot while Codex may still be compacting; keep waiting for
+      // the correlated turn/completed (or explicit interrupt/close) so queued agent
+      // messages continue to receive AgentTurnBusyError and requeue cleanly.
+      this.logger.warn(
+        {
+          agentId: this.agentId,
+          threadId: compaction.threadId,
+          nativeTurnId: compaction.nativeTurnId,
+        },
+        "Codex compaction exceeded timeout after turn/started; keeping foreground turn active until correlated completion",
+      );
+      return;
+    }
+    void this.terminateAmbiguousCompaction(
+      compaction,
+      "Codex compaction timed out before turn/started",
+    );
+  }
+
+  private handleCompactionRpcFailure(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+    error: unknown,
+  ): void {
+    if (this.activeCompaction !== compaction || compaction.tearingDown) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : "Codex thread/compact/start failed";
+    if (error instanceof CodexAppServerRpcError) {
+      this.clearActiveCompactionTimer(compaction);
+      this.activeCompaction = null;
+      this.activeForegroundTurnId = null;
+      this.activeClientMessageId = null;
+      this.currentTurnId = null;
+      this.pendingForegroundTurnIdentification?.resolve(null);
+      this.pendingForegroundTurnIdentification = null;
+      this.emitEvent({
+        type: "turn_failed",
+        provider: CODEX_PROVIDER,
+        error: message,
+        turnId: compaction.foregroundTurnId,
+      });
+      return;
+    }
+    if (compaction.nativeTurnId !== null) {
+      this.logger.warn(
+        {
+          err: error,
+          agentId: this.agentId,
+          threadId: compaction.threadId,
+          nativeTurnId: compaction.nativeTurnId,
+        },
+        "Codex thread/compact/start RPC failed after turn/started; keeping foreground turn active until correlated completion",
+      );
+      return;
+    }
+    void this.terminateAmbiguousCompaction(compaction, message);
+  }
+
+  private armAndDispatchCompaction(client: CodexAppServerClient, threadId: string): string {
+    const turnId = this.createTurnId();
+    const timeoutMs = this.deps.compactionTimeoutMs ?? CODEX_COMPACTION_TIMEOUT_MS;
+    const rpcTimeoutMs = this.deps.compactionRpcTimeoutMs ?? CODEX_COMPACTION_RPC_TIMEOUT_MS;
+    const compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]> = {
+      foregroundTurnId: turnId,
+      threadId,
+      nativeTurnId: null,
+      compactionItemIds: new Set<string>(),
+      sawCompactionStarted: false,
+      sawCompactionCompleted: false,
+      sawLoadingItem: false,
+      timedOut: false,
+      tearingDown: false,
+      postCompactionUsage: undefined,
+      timer: null,
+    };
+    this.activeForegroundTurnId = turnId;
+    this.activeClientMessageId = null;
+    this.currentTurnId = null;
+    this.pendingForegroundTurnIdentification?.resolve(null);
+    let resolveTurnIdentification!: (identifiedTurnId: string | null) => void;
+    const turnIdentification = new Promise<string | null>((resolvePromise) => {
+      resolveTurnIdentification = resolvePromise;
+    });
+    this.pendingForegroundTurnIdentification = {
+      foregroundTurnId: turnId,
+      promise: turnIdentification,
+      resolve: resolveTurnIdentification,
+    };
+    this.activeCompaction = compaction;
+    compaction.timer = setTimeout(() => {
+      this.handleCompactionTimeout(compaction);
+    }, timeoutMs);
+    compaction.timer.unref();
+    try {
+      const rpcPromise = client.request("thread/compact/start", { threadId }, rpcTimeoutMs);
+      void rpcPromise.catch((error: unknown) => {
+        this.handleCompactionRpcFailure(compaction, error);
+      });
+      return turnId;
+    } catch (error) {
+      if (this.activeCompaction === compaction) {
+        this.clearActiveCompactionTimer(compaction);
+        this.activeCompaction = null;
+        this.activeForegroundTurnId = null;
+        this.activeClientMessageId = null;
+        this.currentTurnId = null;
+        this.pendingForegroundTurnIdentification?.resolve(null);
+        this.pendingForegroundTurnIdentification = null;
+        if (
+          !(error instanceof CodexAppServerRpcError) &&
+          !this.closed &&
+          this.connectionState === "connected"
+        ) {
+          this.compactionQuarantined = true;
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async verifyCompactionRemotePreconditions(): Promise<boolean> {
+    const terminalsClear = await this.areBackgroundTerminalsClear().catch(() => false);
+    if (!terminalsClear) return false;
+    const threadIdle = await this.isRootThreadIdleForCompaction();
+    if (!threadIdle) return false;
+    return this.isGoalInactiveForCompaction();
+  }
+
+  private async startCompactionTurn(
+    prompt: AgentPromptInput,
+    admitBeforeDispatch: () => boolean,
+  ): Promise<{ turnId: string }> {
+    const parsed = typeof prompt === "string" ? this.parseSlashCommandInput(prompt) : null;
+    if (!parsed || parsed.commandName !== "compact") {
+      throw new AgentCompactionAdmitError("Codex compaction requires the /compact command");
+    }
+    if ((parsed.args ?? "").trim().length > 0) {
+      throw new AgentCompactionAdmitError("Compaction instructions are not supported for codex");
+    }
+    if (!this.isCompactionLocallySafeSync() || admitBeforeDispatch() !== true) {
+      throw new AgentCompactionAdmitError("Codex session is no longer idle for compaction");
+    }
+
+    let resolveStart!: () => void;
+    const pendingStart = {
+      promise: new Promise<void>((resolve) => {
+        resolveStart = resolve;
+      }),
+      resolve: () => resolveStart(),
+      cancelRequested: false,
+    };
+    this.pendingForegroundStart = pendingStart;
+
+    try {
+      await this.pendingNotifications;
+      if (pendingStart.cancelRequested || !this.isCompactionLocallySafeSync(pendingStart)) {
+        throw new AgentCompactionAdmitError("Codex session became busy before compaction dispatch");
+      }
+      await this.ensureThreadLoaded();
+      await this.waitForInterruptedTurnCleanup();
+      const remoteReady = await this.verifyCompactionRemotePreconditions();
+      if (
+        !remoteReady ||
+        pendingStart.cancelRequested ||
+        !this.isCompactionLocallySafeSync(pendingStart) ||
+        admitBeforeDispatch() !== true
+      ) {
+        throw new AgentCompactionAdmitError("Codex session became busy before compaction dispatch");
+      }
+
+      // Zero awaits between the final admission check above and state mutation / RPC dispatch.
+      return { turnId: this.armAndDispatchCompaction(this.client!, this.currentThreadId!) };
+    } finally {
+      if (this.pendingForegroundStart === pendingStart) {
+        this.pendingForegroundStart = null;
+      }
+      pendingStart.resolve();
+    }
+  }
+
   async startTurn(
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<{ turnId: string }> {
+    if (options?.admitBeforeDispatch) {
+      return this.startCompactionTurn(prompt, options.admitBeforeDispatch);
+    }
+    if (this.compactionQuarantined) {
+      throw new AgentTurnBusyError("Codex session is quarantined after an ambiguous compaction");
+    }
     if (this.activeForegroundTurnId || this.pendingForegroundStart) {
-      throw new Error("A foreground turn is already active");
+      throw new AgentTurnBusyError("A foreground turn is already active");
     }
 
     let resolveStart!: () => void;
@@ -4729,6 +5117,21 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
+  private canAttemptSteer(
+    client: CodexAppServerClient | null,
+    threadId: string | null,
+    foregroundTurnId: string | null,
+    expectedTurnId: string,
+  ): client is CodexAppServerClient {
+    return (
+      client !== null &&
+      threadId !== null &&
+      foregroundTurnId === expectedTurnId &&
+      this.activeCompaction === null &&
+      !this.compactionQuarantined
+    );
+  }
+
   async steerActiveTurn(
     prompt: AgentPromptInput,
     options: SteerActiveTurnOptions,
@@ -4737,31 +5140,47 @@ export class CodexAppServerAgentSession implements AgentSession {
     const threadId = this.currentThreadId;
     let nativeTurnId = this.currentTurnId;
     const foregroundTurnId = this.activeForegroundTurnId;
-    if (!client || !threadId || foregroundTurnId !== options.expectedTurnId) {
+    if (!this.canAttemptSteer(client, threadId, foregroundTurnId, options.expectedTurnId)) {
       return { status: "unavailable" };
     }
+    const targetThreadId = threadId!;
+    const targetForegroundTurnId = options.expectedTurnId;
     const pendingIdentification = this.pendingForegroundTurnIdentification;
     // The start acknowledgement precedes the notification that identifies the native
     // turn. Keep this steer attached to the accepted foreground turn while it arrives.
-    if (!nativeTurnId && pendingIdentification?.foregroundTurnId === foregroundTurnId) {
+    if (!nativeTurnId && pendingIdentification?.foregroundTurnId === targetForegroundTurnId) {
       nativeTurnId = await pendingIdentification.promise;
     }
     if (!nativeTurnId) {
       return { status: "unavailable" };
     }
     if (await this.resolveSlashCommandInvocation(prompt)) return { status: "unavailable" };
-    if (!this.matchesSteerAdmission({ client, threadId, nativeTurnId, foregroundTurnId })) {
+    if (
+      !this.matchesSteerAdmission({
+        client,
+        threadId: targetThreadId,
+        nativeTurnId,
+        foregroundTurnId: targetForegroundTurnId,
+      })
+    ) {
       return { status: "unavailable" };
     }
     const input = await this.buildUserInput(prompt);
-    if (!this.matchesSteerAdmission({ client, threadId, nativeTurnId, foregroundTurnId })) {
+    if (
+      !this.matchesSteerAdmission({
+        client,
+        threadId: targetThreadId,
+        nativeTurnId,
+        foregroundTurnId: targetForegroundTurnId,
+      })
+    ) {
       return { status: "unavailable" };
     }
     try {
       const response = await client.request(
         "turn/steer",
         {
-          threadId,
+          threadId: targetThreadId,
           expectedTurnId: nativeTurnId,
           input,
           ...(options.clientMessageId ? { clientUserMessageId: options.clientMessageId } : {}),
@@ -5329,6 +5748,27 @@ export class CodexAppServerAgentSession implements AgentSession {
     });
   }
 
+  private clearAlreadyIdleTurnAfterInterrupt(): void {
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      this.clearActiveCompactionTimer(compaction);
+      this.activeCompaction = null;
+    }
+    this.activeForegroundTurnId = null;
+    this.activeClientMessageId = null;
+    this.currentTurnId = null;
+    this.pendingForegroundTurnIdentification?.resolve(null);
+    this.pendingForegroundTurnIdentification = null;
+    if (compaction) {
+      this.emitEvent({
+        type: "turn_canceled",
+        provider: CODEX_PROVIDER,
+        reason: "interrupted",
+        turnId: compaction.foregroundTurnId,
+      });
+    }
+  }
+
   async interrupt(): Promise<void> {
     const pendingStart = this.pendingForegroundStart;
     if (pendingStart) {
@@ -5388,11 +5828,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (!isCodexAlreadyIdleInterrupt(error)) {
         throw error;
       }
-      this.activeForegroundTurnId = null;
-      this.activeClientMessageId = null;
-      this.currentTurnId = null;
-      this.pendingForegroundTurnIdentification?.resolve(null);
-      this.pendingForegroundTurnIdentification = null;
+      this.clearAlreadyIdleTurnAfterInterrupt();
     }
   }
 
@@ -5400,21 +5836,8 @@ export class CodexAppServerAgentSession implements AgentSession {
     return this.background.stopItem(id);
   }
 
-  async canStopRuntime(): Promise<boolean> {
-    // A history session released its app-server once it read the thread, so nothing runs.
-    if (this.connectionState === "history-ready") return true;
-    if (
-      !this.client ||
-      this.client.hasPendingRequests() ||
-      !this.currentThreadId ||
-      this.activeForegroundTurnId ||
-      this.currentTurnId ||
-      this.pendingForegroundStart ||
-      this.pendingPermissionHandlers.size ||
-      this.getPendingPermissions().length ||
-      this.pendingSubAgentNotificationsByThreadId.size
-    )
-      return false;
+  private async areBackgroundTerminalsClear(): Promise<boolean> {
+    if (!this.client || !this.currentThreadId) return false;
     // Older app servers reject this request. A failed or malformed probe must retain
     // the process: command completion alone does not mean its terminal has exited.
     const loaded = z
@@ -5428,6 +5851,13 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (response.data.length > 0 || response.nextCursor !== null) return false;
     }
     return !this.client.hasPendingRequests();
+  }
+
+  async canStopRuntime(): Promise<boolean> {
+    // A history session released its app-server once it read the thread, so nothing runs.
+    if (this.connectionState === "history-ready") return true;
+    if (!this.isCompactionLocallySafeSync()) return false;
+    return this.areBackgroundTerminalsClear();
   }
 
   // Remember which turn started a command, so an interrupt ends that turn's commands and
@@ -5563,6 +5993,11 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.activeCompaction) {
+      this.clearActiveCompactionTimer(this.activeCompaction);
+      this.activeCompaction = null;
+    }
+    this.compactionQuarantined = false;
     this.startupAbort.abort(this.createClosedError());
     this.background.stop();
     this.clearPendingPermissions();
@@ -5597,12 +6032,19 @@ export class CodexAppServerAgentSession implements AgentSession {
 
   private async disposeClient(): Promise<void> {
     this.background.stop();
+    if (this.activeCompaction) {
+      this.clearActiveCompactionTimer(this.activeCompaction);
+      if (!this.activeCompaction.tearingDown) {
+        this.activeCompaction = null;
+      }
+    }
     const client = this.client;
     this.connectionState = "disconnected";
     this.currentTurnId = null;
     if (client) {
       await client.dispose();
     }
+    this.compactionQuarantined = false;
     this.client = null;
   }
 
@@ -5652,6 +6094,13 @@ export class CodexAppServerAgentSession implements AgentSession {
     if (!parsed) return null;
 
     if (parsed.commandName === "compact") {
+      if (
+        this.activeCompaction !== null ||
+        this.pendingForegroundStart !== null ||
+        this.compactionQuarantined
+      ) {
+        return null;
+      }
       return {
         run: async ({ emit }) => {
           const error = await this.executeCompactCommand();
@@ -5682,6 +6131,13 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private async executeCompactCommand(): Promise<string | null> {
+    if (
+      this.activeCompaction !== null ||
+      this.pendingForegroundStart !== null ||
+      this.compactionQuarantined
+    ) {
+      return "Context compaction is already in progress";
+    }
     try {
       await this.connect();
       if (this.currentThreadId) {
@@ -6324,13 +6780,60 @@ export class CodexAppServerAgentSession implements AgentSession {
     return true;
   }
 
-  private handleCompletedContextCompactionItem(item: {
-    id?: string;
-    type?: string;
-    [key: string]: unknown;
-  }): boolean {
+  private matchesActiveCompactionTurn(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+    threadId: string | null,
+    turnId: string | null,
+    options?: { allowBindTurnId?: boolean },
+  ): boolean {
+    if (threadId !== compaction.threadId) return false;
+    if (!turnId) return false;
+    if (compaction.nativeTurnId === null) {
+      if (options?.allowBindTurnId) {
+        compaction.nativeTurnId = turnId;
+        this.currentTurnId = turnId;
+        return true;
+      }
+      return false;
+    }
+    return compaction.nativeTurnId === turnId;
+  }
+
+  private handleCompletedContextCompactionItem(
+    item: {
+      id?: string;
+      type?: string;
+      [key: string]: unknown;
+    },
+    parsed?: Extract<ParsedCodexNotification, { kind: "item_completed" }>,
+  ): boolean {
     if (!this.isContextCompactionItem(item)) {
       return false;
+    }
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      const matched =
+        parsed !== undefined &&
+        this.matchesActiveCompactionTurn(compaction, parsed.threadId, parsed.turnId, {
+          allowBindTurnId: false,
+        }) &&
+        (compaction.compactionItemIds.size === 0 ||
+          !item.id ||
+          compaction.compactionItemIds.has(item.id));
+      if (!matched) {
+        return true;
+      }
+      if (!compaction.sawCompactionCompleted) {
+        compaction.sawCompactionCompleted = true;
+        compaction.sawLoadingItem = false;
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "compaction", status: "completed", trigger: "manual" },
+          turnId: compaction.foregroundTurnId,
+        });
+      }
+      return true;
     }
     const consumedPendingCompaction = this.consumePendingRootCompaction(item.id);
     const hasDifferentPendingCompaction =
@@ -6372,7 +6875,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return true;
     }
     return (
-      this.handleCompletedContextCompactionItem(parsed.item) ||
+      this.handleCompletedContextCompactionItem(parsed.item, parsed) ||
       this.handleRegisteredSubAgentActivity(parsed.item)
     );
   }
@@ -6695,6 +7198,32 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, "running", { reopen: true });
       return;
     }
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      if (
+        !this.matchesActiveCompactionTurn(compaction, parsed.threadId, parsed.turnId, {
+          allowBindTurnId: true,
+        })
+      ) {
+        return;
+      }
+      this.markCurrentThreadSaved(parsed.threadId);
+      this.currentTurnId = parsed.turnId;
+      const pendingIdentification = this.pendingForegroundTurnIdentification;
+      if (
+        pendingIdentification &&
+        pendingIdentification.foregroundTurnId === compaction.foregroundTurnId
+      ) {
+        pendingIdentification.resolve(parsed.turnId);
+        this.pendingForegroundTurnIdentification = null;
+      }
+      this.emitEvent({
+        type: "turn_started",
+        provider: CODEX_PROVIDER,
+        turnId: compaction.foregroundTurnId,
+      });
+      return;
+    }
     this.markCurrentThreadSaved(parsed.threadId);
     this.currentTurnId = parsed.turnId;
     const pendingIdentification = this.pendingForegroundTurnIdentification;
@@ -6720,6 +7249,97 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.emitEvent({ type: "thread_started", provider: CODEX_PROVIDER, sessionId: current });
   }
 
+  private handleActiveCompactionTurnCompleted(
+    compaction: NonNullable<CodexAppServerAgentSession["activeCompaction"]>,
+    parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
+  ): void {
+    // Only canonical turn/completed matching an already-bound (threadId, turnId) can settle
+    // programmatic compaction; foreign turns or legacy codex/event/* are ignored.
+    if (
+      parsed.source !== "turn" ||
+      parsed.threadId !== compaction.threadId ||
+      !parsed.turnId ||
+      compaction.nativeTurnId === null ||
+      parsed.turnId !== compaction.nativeTurnId
+    ) {
+      return;
+    }
+    this.clearActiveCompactionTimer(compaction);
+    this.activeCompaction = null;
+    if (parsed.status !== "interrupted" && this.currentTurnId) {
+      this.terminalProcessIdsByTurnId.delete(this.currentTurnId);
+    }
+    const closeUnconfirmedLoading = () => {
+      if (compaction.sawLoadingItem && !compaction.sawCompactionCompleted) {
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "compaction", status: "completed" },
+          turnId: compaction.foregroundTurnId,
+        });
+      }
+    };
+    if (parsed.status === "failed") {
+      closeUnconfirmedLoading();
+      this.emitEvent({
+        type: "turn_failed",
+        provider: CODEX_PROVIDER,
+        error: parsed.errorMessage ?? "Codex compaction failed",
+        turnId: compaction.foregroundTurnId,
+      });
+    } else if (parsed.status === "interrupted") {
+      closeUnconfirmedLoading();
+      this.emitEvent({
+        type: "turn_canceled",
+        provider: CODEX_PROVIDER,
+        reason: "interrupted",
+        turnId: compaction.foregroundTurnId,
+      });
+    } else if (!compaction.sawCompactionCompleted) {
+      closeUnconfirmedLoading();
+      this.emitEvent({
+        type: "turn_failed",
+        provider: CODEX_PROVIDER,
+        error: "Codex compaction turn completed without positive compaction confirmation",
+        turnId: compaction.foregroundTurnId,
+      });
+    } else {
+      this.emitEvent({
+        type: "turn_completed",
+        provider: CODEX_PROVIDER,
+        usage: compaction.postCompactionUsage,
+        turnId: compaction.foregroundTurnId,
+      });
+    }
+    this.activeForegroundTurnId = null;
+    this.activeClientMessageId = null;
+    this.currentTurnId = null;
+    this.pendingForegroundTurnIdentification?.resolve(null);
+    this.pendingForegroundTurnIdentification = null;
+    this.pendingSubAgentNotificationsByThreadId.clear();
+    this.resetTurnTrackingState();
+  }
+
+  private closePendingRootCompactionsWithoutConfirm(): void {
+    for (const itemId of this.pendingRootCompactionItemIds) {
+      this.compactionTriggerByItemId.delete(itemId);
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "compaction", status: "completed" },
+      });
+    }
+    for (let index = 0; index < this.pendingAnonymousRootCompactions; index += 1) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "compaction", status: "completed" },
+      });
+    }
+    this.pendingRootCompactionItemIds.clear();
+    this.pendingAnonymousRootCompactions = 0;
+  }
+
   private handleTurnCompletedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "turn_completed" }>,
   ): void {
@@ -6735,7 +7355,16 @@ export class CodexAppServerAgentSession implements AgentSession {
       this.emitSubAgentActivityUpdate(subAgentCallId, status);
       return;
     }
-    this.completePendingRootCompactions();
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      this.handleActiveCompactionTurnCompleted(compaction, parsed);
+      return;
+    }
+    if (parsed.status === "completed") {
+      this.completePendingRootCompactions();
+    } else {
+      this.closePendingRootCompactionsWithoutConfirm();
+    }
     // What a turn that was not interrupted leaves running, it left on purpose; no later
     // interrupt may end it.
     if (parsed.status !== "interrupted" && this.currentTurnId) {
@@ -6867,7 +7496,30 @@ export class CodexAppServerAgentSession implements AgentSession {
   private handleTokenUsageUpdatedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "token_usage_updated" }>,
   ): void {
-    this.latestUsage = toAgentUsage(parsed.tokenUsage);
+    if (parsed.threadId && this.currentThreadId && parsed.threadId !== this.currentThreadId) {
+      return;
+    }
+    const usage = toAgentUsage(parsed.tokenUsage);
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      if (
+        usage &&
+        this.matchesActiveCompactionTurn(compaction, parsed.threadId, parsed.turnId, {
+          allowBindTurnId: false,
+        })
+      ) {
+        compaction.postCompactionUsage = usage;
+        this.latestUsage = usage;
+        this.notifySubscribers({
+          type: "usage_updated",
+          provider: CODEX_PROVIDER,
+          usage,
+          turnId: compaction.foregroundTurnId,
+        });
+      }
+      return;
+    }
+    this.latestUsage = usage;
     if (this.latestUsage) {
       this.notifySubscribers({
         type: "usage_updated",
@@ -6989,6 +7641,27 @@ export class CodexAppServerAgentSession implements AgentSession {
     parsed: Extract<ParsedCodexNotification, { kind: "context_compacted" }>,
   ): void {
     if (parsed.threadId !== this.currentThreadId) {
+      return;
+    }
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      if (
+        !this.matchesActiveCompactionTurn(compaction, parsed.threadId, parsed.turnId, {
+          allowBindTurnId: false,
+        })
+      ) {
+        return;
+      }
+      if (!compaction.sawCompactionCompleted) {
+        compaction.sawCompactionCompleted = true;
+        compaction.sawLoadingItem = false;
+        this.emitEvent({
+          type: "timeline",
+          provider: CODEX_PROVIDER,
+          item: { type: "compaction", status: "completed", trigger: "manual" },
+          turnId: compaction.foregroundTurnId,
+        });
+      }
       return;
     }
     if (this.unpairedCompactionItemCompletions > 0) {
@@ -7354,6 +8027,39 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
+  private handleStartedContextCompactionItem(
+    parsed: Extract<ParsedCodexNotification, { kind: "item_started" }>,
+  ): void {
+    const compaction = this.activeCompaction;
+    if (compaction) {
+      if (
+        !this.matchesActiveCompactionTurn(compaction, parsed.threadId, parsed.turnId, {
+          allowBindTurnId: false,
+        })
+      ) {
+        return;
+      }
+      compaction.sawCompactionStarted = true;
+      compaction.sawLoadingItem = true;
+      if (typeof parsed.item.id === "string" && parsed.item.id) {
+        compaction.compactionItemIds.add(parsed.item.id);
+      }
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "compaction", status: "loading", trigger: "manual" },
+        turnId: compaction.foregroundTurnId,
+      });
+      return;
+    }
+    this.trackPendingRootCompaction(parsed.item.id);
+    this.emitEvent({
+      type: "timeline",
+      provider: CODEX_PROVIDER,
+      item: this.createContextCompactionTimelineItem("loading", parsed.item.id),
+    });
+  }
+
   private async handleItemStartedNotification(
     parsed: Extract<ParsedCodexNotification, { kind: "item_started" }>,
   ): Promise<void> {
@@ -7379,12 +8085,7 @@ export class CodexAppServerAgentSession implements AgentSession {
       return;
     }
     if (this.isContextCompactionItem(parsed.item)) {
-      this.trackPendingRootCompaction(parsed.item.id);
-      this.emitEvent({
-        type: "timeline",
-        provider: CODEX_PROVIDER,
-        item: this.createContextCompactionTimelineItem("loading", parsed.item.id),
-      });
+      this.handleStartedContextCompactionItem(parsed);
       return;
     }
     if (this.handleRegisteredSubAgentActivity(parsed.item)) {

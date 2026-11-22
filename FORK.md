@@ -34,20 +34,22 @@ queue sits on. Every commit carries `Upstream-Status:`
 
 The commit trailers are authoritative; this is the summary.
 
-| commit                                                   | drop when                                               |
-| -------------------------------------------------------- | ------------------------------------------------------- |
-| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice   |
-| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting              |
-| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start |
-| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                        |
-| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                         |
-| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools |
-| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                  |
-| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode         |
-| fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json   |
-| feat(server): add compact_agent MCP tool                 | upstream ships a remote compaction MCP tool (#8708)     |
-| feat(server): auto-compact idle agents before cache TTL  | upstream ships per-provider idle auto-compaction        |
-| fix(server): forward supportsCompaction in wrapper       | upstream forwards supportsCompaction in provider wrap   |
+| commit                                                   | drop when                                                |
+| -------------------------------------------------------- | -------------------------------------------------------- |
+| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice    |
+| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting               |
+| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start  |
+| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                         |
+| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                          |
+| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools  |
+| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                   |
+| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode          |
+| fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json    |
+| feat(server): add compact_agent MCP tool                 | upstream ships a remote compaction MCP tool (#8708)      |
+| feat(server): auto-compact idle agents before cache TTL  | upstream ships per-provider idle auto-compaction         |
+| fix(server): forward supportsCompaction in wrapper       | upstream forwards supportsCompaction in provider wrap    |
+| fix(server): harden ACP safety and compaction plumbing   | upstream forwards compaction flags and ACP safety checks |
+| feat(server): support compact_agent for Codex & OpenCode | upstream ships multi-provider compact_agent (#8708)      |
 
 ## Branches
 
