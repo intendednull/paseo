@@ -58,6 +58,53 @@ describe("Android app config", () => {
     },
     30_000,
   );
+
+  it("configures fork variant with side-by-side applicationId", async () => {
+    const previousVariant = process.env.APP_VARIANT;
+    const configPath = require.resolve("./app.config.js");
+    delete require.cache[configPath];
+    process.env.APP_VARIANT = "fork";
+    try {
+      const { exp } = await getPrebuildConfigAsync(__dirname, { platforms: ["android"] });
+      expect(exp.name).toBe("Paseo (fork)");
+      expect(exp.android?.package).toBe("sh.paseo.fork");
+    } finally {
+      delete require.cache[configPath];
+      if (previousVariant === undefined) {
+        delete process.env.APP_VARIANT;
+      } else {
+        process.env.APP_VARIANT = previousVariant;
+      }
+    }
+  }, 30_000);
+
+  it("wires env-backed release signing into build.gradle idempotently", () => {
+    const { configureAndroidReleaseSigning } = require("./plugins/with-android-release-signing");
+    const sampleGradle = `android {
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+}`;
+    const configured = configureAndroidReleaseSigning(sampleGradle);
+    expect(configured).toContain("PASEO_ANDROID_SIGNING_KEYSTORE");
+    expect(configured).toContain("PASEO_ANDROID_SIGNING_PASSWORD_FILE");
+    expect(configured).toContain("signingConfig signingConfigs.release");
+    expect(configured).toContain("debug {\n            signingConfig signingConfigs.debug");
+    expect(configureAndroidReleaseSigning(configured)).toBe(configured);
+  });
 });
 
 it("follows system rotation on Android", async () => {
