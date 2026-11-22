@@ -13,7 +13,7 @@ git merge-base --is-ancestor "$base" HEAD || { echo "gate: HEAD is not on $base 
 oxfmt --check $(git diff --name-only --diff-filter=d "$base" HEAD -- . ":!.fork/notes")
 oxlint
 npm run build:server
-npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --workspace=@getpaseo/desktop
+npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/client --workspace=@getpaseo/app --workspace=@getpaseo/desktop
 (cd packages/server && npx vitest run \
   src/server/speech/providers/openai src/server/session/voice \
   src/server/agent/agent-compact.test.ts src/server/agent/idle-compaction \
@@ -23,9 +23,11 @@ npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --works
   src/server/agent/providers/codex-app-server-agent.test.ts \
   src/server/agent/providers/opencode/v2/agent.test.ts \
   src/server/agent/providers/opencode/v2/timeline.test.ts)
+(cd packages/client && npx vitest run \
+  src/daemon-client.test.ts -t "streamFile|readFile")
 (cd packages/app && npx vitest run --project unit \
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \
-  src/stores/sidebar-view-store.test.ts src/i18n)
+  src/stores/sidebar-view-store.test.ts src/stores/download-store.test.ts src/i18n)
 npm run test --workspace=@getpaseo/desktop
 '
