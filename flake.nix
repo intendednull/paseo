@@ -72,6 +72,13 @@
         system:
         let
           pkgs = pkgsFor system;
+          androidPkgs = import nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
+          };
         in
         {
           default = pkgs.mkShell {
@@ -79,6 +86,11 @@
               pkgs.nodejs_22
               pkgs.python3
             ];
+          };
+        }
+        // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isx86_64 || pkgs.stdenv.hostPlatform.isDarwin) {
+          android = import ./nix/android-shell.nix {
+            inherit pkgs androidPkgs;
           };
         }
       );
