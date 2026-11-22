@@ -206,6 +206,13 @@ export type AgentPromptContentBlock =
 
 export type AgentPromptInput = string | AgentPromptContentBlock[];
 
+export class AgentTurnBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentTurnBusyError";
+  }
+}
+
 export class AgentCompactionAdmitError extends Error {
   constructor(message: string) {
     super(message);
@@ -789,6 +796,17 @@ export interface AgentSession {
    * and idle auto-compaction). When omitted, compaction is unsupported.
    */
   supportsCompaction?(): Promise<boolean> | boolean;
+  /**
+   * Whether programmatic compaction accepts custom focus instructions.
+   * Defaults to false when omitted.
+   */
+  readonly supportsCompactionInstructions?: boolean;
+  /**
+   * Whether the session is quarantined after an ambiguous compaction outcome.
+   * While quarantined, normal turns and steering must not reach the provider and
+   * agent messages receive AgentTurnBusyError so they requeue instead of dropping.
+   */
+  isCompactionQuarantined?(): boolean;
   listCommands?(): Promise<AgentSlashCommand[]>;
   /** A returned model is the effective selection committed by this mutation.
    * Returning void means the requested selection was accepted. No status read is required. */

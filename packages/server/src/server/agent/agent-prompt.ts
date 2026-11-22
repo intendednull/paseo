@@ -28,7 +28,9 @@ export type AgentRunController = Pick<
   reloadAgentSession(agentId: string): Promise<unknown>;
 };
 
-export class AgentTurnBusyError extends Error {}
+import { AgentTurnBusyError } from "./agent-sdk-types.js";
+
+export { AgentTurnBusyError };
 
 /** The turn a steer targeted ended or changed before the provider took the steer. */
 export class AgentTurnChangedError extends Error {}

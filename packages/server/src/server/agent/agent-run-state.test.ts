@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
-import { AgentRunState } from "./agent-run-state.js";
+import { AgentRunState, ForegroundPromptStart } from "./agent-run-state.js";
+import { AgentTurnBusyError } from "./agent-sdk-types.js";
 
 function track(promise: Promise<void>): { readonly resolved: boolean } {
   const state = { resolved: false };
@@ -47,5 +48,44 @@ describe("waitForForegroundStart", () => {
   test("resolves at once when no turn is starting", async () => {
     const runs = new AgentRunState();
     await expect(runs.waitForForegroundStart("agent")).resolves.toBeUndefined();
+  });
+});
+
+describe("ForegroundPromptStart", () => {
+  test("rejects with AgentTurnBusyError when start settlement is marked busy", async () => {
+    const runs = new AgentRunState();
+    const run = runs.createPendingRun("agent");
+    const start = new ForegroundPromptStart("agent");
+    start.bind(run);
+
+    runs.settleForegroundStart(run, {
+      status: "failed",
+      error: "A foreground turn is already active",
+      busy: true,
+    });
+    runs.settleForegroundRun("agent", run.token);
+
+    await expect(start.started).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof AgentTurnBusyError &&
+        error.message === "A foreground turn is already active",
+    );
+  });
+
+  test("rejects with plain Error for non-busy failed start settlement", async () => {
+    const runs = new AgentRunState();
+    const run = runs.createPendingRun("agent");
+    const start = new ForegroundPromptStart("agent");
+    start.bind(run);
+
+    runs.settleForegroundStart(run, { status: "failed", error: "provider start failed" });
+    runs.settleForegroundRun("agent", run.token);
+
+    await expect(start.started).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof AgentTurnBusyError) &&
+        error.message === "provider start failed",
+    );
   });
 });

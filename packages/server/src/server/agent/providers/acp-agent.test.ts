@@ -5310,6 +5310,63 @@ describe("ACP idle runtime cleanup", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("in-progress background tool calls veto canStopRuntime until completed, while replayed history tool calls do not, and ACP stays compaction-unsupported", async () => {
+    const session = createSession();
+    try {
+      const internals = asInternals<{
+        sessionId: string | null;
+        replayingHistory: boolean;
+        toolCalls: Map<string, unknown>;
+      }>(session);
+      internals.sessionId = "session-1";
+      expect((session as AgentSession).supportsCompaction).toBeUndefined();
+      expect(await session.canStopRuntime()).toBe(true);
+
+      // Replayed history ending with an in_progress tool call must not veto canStopRuntime.
+      internals.replayingHistory = true;
+      await session.sessionUpdate({
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "replayed-unfinished-1",
+          title: "old command from history",
+          kind: "execute",
+          status: "in_progress",
+        },
+      });
+      internals.replayingHistory = false;
+      expect(internals.toolCalls.has("replayed-unfinished-1")).toBe(true);
+      expect(await session.canStopRuntime()).toBe(true);
+
+      // A live post-replay in_progress tool call vetoes canStopRuntime until completed.
+      await session.sessionUpdate({
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "bg-1",
+          title: "sleep 10",
+          kind: "execute",
+          status: "in_progress",
+        },
+      });
+      expect(internals.toolCalls.has("bg-1")).toBe(true);
+      expect(await session.canStopRuntime()).toBe(false);
+
+      await session.sessionUpdate({
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "bg-1",
+          status: "completed",
+        },
+      });
+      expect(await session.canStopRuntime()).toBe(true);
+    } finally {
+      await session.close();
+    }
+    expect(await session.canStopRuntime()).toBe(false);
+  });
 });
 
 describe("custom ACP provider with configured models", () => {
