@@ -51,6 +51,7 @@ interface V2AgentOptions {
   bridge?: OpenCodeBridge;
   runtime?: Pick<V2Runtime, "acquire" | "shutdown">;
   selection?: OpenCodeServiceSelection;
+  compactionTimeoutMs?: number;
 }
 
 export class OpenCodeV2AgentClient implements AgentClient {
@@ -220,6 +221,7 @@ export class OpenCodeV2AgentClient implements AgentClient {
       acquire,
       moved,
       historyOnly,
+      this.options.compactionTimeoutMs,
     );
     try {
       await session.initialize(

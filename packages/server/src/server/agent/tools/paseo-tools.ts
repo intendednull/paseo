@@ -2127,7 +2127,7 @@ function createToolCatalog(
     {
       title: "Compact agent",
       description:
-        "Compact an idle agent's conversation context to reduce context window usage. Refuses when the target is mid-turn or waiting on permissions, and reports context size before and after.",
+        "Compact an idle agent's conversation context to reduce context window usage. Refuses when the target is mid-turn or waiting on permissions, and reports context size before and after (for Codex, contextTokensAfter is Codex's post-compaction context estimate; for OpenCode, null until the next turn).",
       inputSchema: {
         agentId: z.string(),
         instructions: z

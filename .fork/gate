@@ -19,7 +19,10 @@ npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --works
   src/server/agent/agent-compact.test.ts src/server/agent/idle-compaction \
   src/server/agent/agent-run-state.test.ts \
   src/server/agent/provider-registry-wrap.test.ts \
-  src/server/agent/providers/acp-agent.test.ts)
+  src/server/agent/providers/acp-agent.test.ts \
+  src/server/agent/providers/codex-app-server-agent.test.ts \
+  src/server/agent/providers/opencode/v2/agent.test.ts \
+  src/server/agent/providers/opencode/v2/timeline.test.ts)
 (cd packages/app && npx vitest run --project unit \
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \

@@ -3,13 +3,16 @@ import type { OpenCodeEvent, SessionInfo, SessionMessageInfo } from "@opencode/c
 
 import { randomUUID } from "node:crypto";
 
-import type {
-  AgentPromptInput,
-  AgentRunOptions,
-  AgentStreamEvent,
-  SteerActiveTurnOptions,
-  SteerResult,
+import {
+  AgentCompactionAdmitError,
+  AgentTurnBusyError,
+  type AgentPromptInput,
+  type AgentRunOptions,
+  type AgentStreamEvent,
+  type SteerActiveTurnOptions,
+  type SteerResult,
 } from "../../../agent-sdk-types.js";
+import { OpenCodeHttpError } from "../http-error.js";
 
 import { toDiagnosticErrorMessage } from "../../diagnostic-utils.js";
 
@@ -44,6 +47,8 @@ interface TurnSnapshot {
   info: SessionInfo;
   history: SessionMessageInfo[];
 }
+const OPENCODE_COMPACTION_TIMEOUT_MS = 180_000;
+
 interface TurnOptions {
   client(): V2Api;
   id: string;
@@ -53,9 +58,19 @@ interface TurnOptions {
   reconcile(): Promise<TurnSnapshot>;
   clearPermissions(): Promise<void>;
   reportReconciliationError(error: unknown): void;
+  compactionTimeoutMs?: number;
+}
+interface CompactionTurnState {
+  inputId: string | null;
+  baselineSeq: number;
+  failedError: string | null;
+  cancelled: boolean;
+  timedOut: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 interface Turn {
   output?: ReturnType<typeof structuredOutput>;
+  compaction?: CompactionTurnState;
   id: string;
   submitted: Promise<void>;
   completion: Promise<void>;
@@ -68,6 +83,7 @@ export class SessionTurns {
   private turn: Turn | null = null;
   private stopping: Promise<void> | null = null;
   private stopFailed = false;
+  private compactionQuarantined = false;
   private revision = 0;
   private execution: ExecutionEvent | null = null;
   private sequence = 0;
@@ -77,6 +93,18 @@ export class SessionTurns {
   constructor(private readonly options: TurnOptions) {}
   get id() {
     return this.turn?.id;
+  }
+  get isBusy() {
+    return Boolean(this.turn || this.stopping || this.compactionQuarantined);
+  }
+  get isCompactionQuarantined() {
+    return this.compactionQuarantined;
+  }
+  get lastSequence() {
+    return this.sequence;
+  }
+  clearQuarantine() {
+    this.compactionQuarantined = false;
   }
   get hasStructuredOutput() {
     return Boolean(this.turn?.output);
@@ -93,6 +121,10 @@ export class SessionTurns {
     });
   }
   private release(turn: Turn) {
+    if (turn.compaction?.timer) {
+      clearTimeout(turn.compaction.timer);
+      turn.compaction.timer = null;
+    }
     this.turn = null;
     this.revision += 1;
     if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -100,9 +132,15 @@ export class SessionTurns {
     turn.settle();
   }
   close() {
+    this.compactionQuarantined = false;
     if (this.turn) this.release(this.turn);
   }
-  private createTurn(submitted: Promise<void>, accepted: boolean, output?: Turn["output"]): Turn {
+  private createTurn(
+    submitted: Promise<void>,
+    accepted: boolean,
+    output?: Turn["output"],
+    compaction?: CompactionTurnState,
+  ): Turn {
     let settle!: () => void;
     const completion = new Promise<void>((resolve) => {
       settle = resolve;
@@ -114,6 +152,7 @@ export class SessionTurns {
       settle,
       accepted,
       output,
+      compaction,
       requestDenied: false,
     };
     this.turn = turn;
@@ -123,10 +162,113 @@ export class SessionTurns {
     this.scheduleRecovery();
     return turn;
   }
+  startCompactionTurn(admitBeforeDispatch: () => boolean, baselineSeq: number): { turnId: string } {
+    if (
+      this.options.signal.aborted ||
+      this.turn ||
+      this.stopping ||
+      this.compactionQuarantined ||
+      admitBeforeDispatch() !== true
+    ) {
+      throw new AgentCompactionAdmitError("OpenCode session is no longer idle for compaction");
+    }
+    // Zero awaits between the final admission check above and dispatching session.compact.
+    let accept!: () => void;
+    const submitted = new Promise<void>((resolve) => {
+      accept = resolve;
+    });
+    const compaction: CompactionTurnState = {
+      inputId: null,
+      baselineSeq: Math.max(this.sequence, baselineSeq),
+      failedError: null,
+      cancelled: false,
+      timedOut: false,
+      timer: null,
+    };
+    const turn = this.createTurn(submitted, false, undefined, compaction);
+    const timeoutMs = this.options.compactionTimeoutMs ?? OPENCODE_COMPACTION_TIMEOUT_MS;
+    compaction.timer = setTimeout(() => {
+      if (this.turn !== turn) return;
+      compaction.timer = null;
+      compaction.timedOut = true;
+      if (compaction.inputId !== null) {
+        // The provider acknowledged the compaction request with an inputId. Keep the
+        // foreground turn active until the correlated compaction record reaches a
+        // terminal status so normal turns and agent messages see AgentTurnBusyError
+        // and requeue cleanly rather than racing an in-flight compaction.
+        this.requestReconciliation();
+        return;
+      }
+      if (!this.options.signal.aborted) {
+        this.compactionQuarantined = true;
+      }
+      this.fail(new Error("OpenCode compaction timed out before provider acknowledged request"));
+    }, timeoutMs);
+    compaction.timer.unref();
+    let compactPromise: ReturnType<V2Api["session"]["compact"]>;
+    try {
+      compactPromise = this.options.client().session.compact({ sessionID: this.options.id });
+    } catch (error) {
+      if (this.turn === turn) {
+        if (!this.isDeterministicReject(error) && !this.options.signal.aborted) {
+          this.compactionQuarantined = true;
+        }
+        this.release(turn);
+      }
+      accept();
+      throw error;
+    }
+    void this.submitCompaction(turn, compaction, compactPromise, accept);
+    return { turnId: turn.id };
+  }
+  private isDeterministicReject(error: unknown): boolean {
+    return (
+      error instanceof OpenCodeHttpError &&
+      typeof error.status === "number" &&
+      error.status >= 400 &&
+      error.status < 500
+    );
+  }
+  private async submitCompaction(
+    turn: Turn,
+    compaction: CompactionTurnState,
+    compactPromise: ReturnType<V2Api["session"]["compact"]>,
+    accept: () => void,
+  ) {
+    try {
+      const enqueued = await compactPromise;
+      if (this.turn !== turn) return;
+      if (typeof enqueued?.id !== "string" || enqueued.id.length === 0) {
+        if (!this.options.signal.aborted) {
+          this.compactionQuarantined = true;
+        }
+        this.fail(new Error("OpenCode compaction did not return a correlation id"));
+        return;
+      }
+      compaction.inputId = enqueued.id;
+      turn.accepted = true;
+      this.revision += 1;
+      this.requestReconciliation();
+    } catch (error) {
+      if (this.turn === turn) {
+        if (!this.isDeterministicReject(error) && !this.options.signal.aborted) {
+          this.compactionQuarantined = true;
+        }
+        this.fail(new Error(toDiagnosticErrorMessage(error)));
+      }
+    } finally {
+      accept();
+    }
+  }
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions) {
     await this.stopping;
     if (this.options.signal.aborted) throw new Error("OpenCode session is closed");
-    if (this.turn) throw new Error("OpenCode session already has an active turn");
+    if (this.compactionQuarantined) {
+      throw new AgentTurnBusyError(
+        "OpenCode session is quarantined after an ambiguous compaction outcome",
+      );
+    }
+    if (this.turn) throw new AgentTurnBusyError("OpenCode session already has an active turn");
     const input = this.promptInput(prompt);
     let accept!: () => void;
     const submitted = new Promise<void>((resolve) => {
@@ -158,12 +300,39 @@ export class SessionTurns {
     }
   }
   observe(event: OpenCodeEvent) {
+    if (this.turn?.compaction && this.observeCompactionEvent(this.turn.compaction, event)) {
+      return;
+    }
     if (!isExecutionEvent(event) || event.durable.seq <= this.sequence) return;
     this.revision += 1;
     if (event.type === "session.execution.started") this.observeActiveTurn();
     this.execution = event;
     this.sequence = event.durable.seq;
     this.requestReconciliation();
+  }
+  private observeCompactionEvent(compaction: CompactionTurnState, event: OpenCodeEvent): boolean {
+    if (event.type === "session.compaction.failed") {
+      if (compaction.inputId && event.data.inputID === compaction.inputId) {
+        compaction.failedError = event.data.error.message;
+        this.revision += 1;
+        this.requestReconciliation();
+      }
+      return true;
+    }
+    if (event.type === "session.inbox.cancelled") {
+      if (compaction.inputId && event.data.inboxID === compaction.inputId) {
+        compaction.cancelled = true;
+        this.revision += 1;
+        this.requestReconciliation();
+      }
+      return true;
+    }
+    if (event.type === "session.compaction.ended") {
+      this.revision += 1;
+      this.requestReconciliation();
+      return true;
+    }
+    return false;
   }
   // OpenCode ends the execution when the user denies its permission or dismisses its question,
   // but reports the interruption as "shutdown", the same reason as an execution it will resume.
@@ -214,6 +383,10 @@ export class SessionTurns {
       return;
     }
     if (!turn?.accepted) return;
+    if (turn.compaction) {
+      await this.reconcileCompactionTurn(turn, turn.compaction, revision);
+      return;
+    }
     // Idle outcome survives shutdown, and /event has no replay. Recover the latest
     // durable execution even when its start or terminal was lost across reconnect.
     const execution = await this.readExecution();
@@ -282,6 +455,122 @@ export class SessionTurns {
       },
     });
   }
+  private async reconcileCompactionTurn(
+    turn: Turn,
+    compaction: CompactionTurnState,
+    revision: number,
+  ) {
+    // Advance sequence/execution cursor and scan durable session log after baselineSeq
+    // for correlated compaction failure or inbox cancellation, then inspect durable history
+    // for the correlated compaction record. Only a terminal correlated record, a strictly
+    // correlated compaction.failed event, or a correlated session.inbox.cancelled event can
+    // settle the compaction turn.
+    const outcome = await this.readCompactionLogOutcome(compaction);
+    if (revision !== this.revision) {
+      this.dirty = true;
+      return;
+    }
+    if (outcome.execution && outcome.execution.durable.seq > this.sequence) {
+      this.execution = outcome.execution;
+      this.sequence = outcome.execution.durable.seq;
+    }
+    if (outcome.failedError && !compaction.failedError) {
+      compaction.failedError = outcome.failedError;
+    }
+    if (outcome.cancelled) {
+      compaction.cancelled = true;
+    }
+    const snapshot = await this.options.reconcile();
+    if (revision !== this.revision) {
+      this.dirty = true;
+      return;
+    }
+    this.finishCompaction(turn, snapshot);
+  }
+  private finishCompaction(turn: Turn, { info, history }: TurnSnapshot) {
+    const compaction = turn.compaction;
+    if (!compaction || !compaction.inputId) return;
+    const record = history.find(
+      (message): message is Extract<SessionMessageInfo, { type: "compaction" }> =>
+        message.type === "compaction" && message.id === compaction.inputId,
+    );
+    if (record?.status === "completed") {
+      this.release(turn);
+      this.options.emit({
+        type: "turn_completed",
+        provider: "opencode",
+        turnId: turn.id,
+        usage: usageFromV2(info),
+      });
+      return;
+    }
+    if (record?.status === "failed") {
+      this.release(turn);
+      this.options.emit({
+        type: "turn_failed",
+        provider: "opencode",
+        turnId: turn.id,
+        error: record.error?.message || compaction.failedError || "OpenCode compaction failed",
+      });
+      return;
+    }
+    if (compaction.failedError) {
+      this.release(turn);
+      this.options.emit({
+        type: "turn_failed",
+        provider: "opencode",
+        turnId: turn.id,
+        error: compaction.failedError,
+      });
+      return;
+    }
+    if (compaction.cancelled) {
+      this.release(turn);
+      this.options.emit({
+        type: "turn_canceled",
+        provider: "opencode",
+        turnId: turn.id,
+        reason: "OpenCode compaction was canceled before starting",
+      });
+    }
+    // Record is still missing (queued in inbox) or "running": keep waiting and reconcile again.
+  }
+  private async readCompactionLogOutcome(compaction: CompactionTurnState): Promise<{
+    execution: ExecutionEvent | null;
+    failedError: string | null;
+    cancelled: boolean;
+  }> {
+    let execution =
+      this.execution && this.execution.durable.seq > compaction.baselineSeq ? this.execution : null;
+    let failedError = compaction.failedError;
+    let cancelled = compaction.cancelled;
+    for await (const event of this.options
+      .client()
+      .session.log(
+        { sessionID: this.options.id, follow: false, after: compaction.baselineSeq },
+        { signal: this.options.signal },
+      )) {
+      if (
+        isExecutionEvent(event) &&
+        event.durable.seq > (execution?.durable.seq ?? compaction.baselineSeq)
+      ) {
+        execution = event;
+      } else if (
+        event.type === "session.inbox.cancelled" &&
+        compaction.inputId &&
+        event.data.inboxID === compaction.inputId
+      ) {
+        cancelled = true;
+      } else if (
+        event.type === "session.compaction.failed" &&
+        compaction.inputId &&
+        event.data.inputID === compaction.inputId
+      ) {
+        failedError = event.data.error.message;
+      }
+    }
+    return { execution, failedError, cancelled };
+  }
   private finish(turn: Turn, { info, history }: TurnSnapshot, execution: ExecutionEvent) {
     if (execution.type === "session.execution.succeeded") turn.output?.assert(history);
     this.release(turn);
@@ -337,7 +626,14 @@ export class SessionTurns {
     prompt: AgentPromptInput,
     options: SteerActiveTurnOptions,
   ): Promise<SteerResult> {
-    if (this.turn?.id !== options.expectedTurnId || this.stopping) return { status: "unavailable" };
+    if (
+      this.turn?.id !== options.expectedTurnId ||
+      this.stopping ||
+      this.turn?.compaction ||
+      this.compactionQuarantined
+    ) {
+      return { status: "unavailable" };
+    }
     await this.options.client().session.prompt({
       sessionID: this.options.id,
       ...this.promptInput(prompt),
