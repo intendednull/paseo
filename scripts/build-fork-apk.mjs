@@ -58,7 +58,7 @@ if (!existsSync(passwordFilePath)) {
 
 const env = {
   ...process.env,
-  APP_VARIANT: process.env.APP_VARIANT ?? "fork",
+  APP_VARIANT: process.env.APP_VARIANT ?? "production",
   CI: "1",
   EXPO_NO_TELEMETRY: "1",
   CMAKE_BUILD_PARALLEL_LEVEL: process.env.CMAKE_BUILD_PARALLEL_LEVEL ?? "4",

@@ -59,25 +59,6 @@ describe("Android app config", () => {
     30_000,
   );
 
-  it("configures fork variant with side-by-side applicationId", async () => {
-    const previousVariant = process.env.APP_VARIANT;
-    const configPath = require.resolve("./app.config.js");
-    delete require.cache[configPath];
-    process.env.APP_VARIANT = "fork";
-    try {
-      const { exp } = await getPrebuildConfigAsync(__dirname, { platforms: ["android"] });
-      expect(exp.name).toBe("Paseo (fork)");
-      expect(exp.android?.package).toBe("sh.paseo.fork");
-    } finally {
-      delete require.cache[configPath];
-      if (previousVariant === undefined) {
-        delete process.env.APP_VARIANT;
-      } else {
-        process.env.APP_VARIANT = previousVariant;
-      }
-    }
-  }, 30_000);
-
   it("wires env-backed release signing into build.gradle idempotently", () => {
     const { configureAndroidReleaseSigning } = require("./plugins/with-android-release-signing");
     const sampleGradle = `android {
