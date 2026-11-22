@@ -94,10 +94,6 @@ const variants = {
       fallbackRelativePath: "./.secrets/GoogleService-Info.debug.plist",
     }),
   },
-  fork: {
-    name: "Paseo (fork)",
-    packageId: "sh.paseo.fork",
-  },
 };
 
 const variant = variants[appVariant] ?? variants.production;
