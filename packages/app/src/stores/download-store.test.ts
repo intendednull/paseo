@@ -6,6 +6,8 @@ import {
   useDownloadStore,
   type Download,
   type DownloadedBytes,
+  type DownloadStreamSink,
+  type OpenDownloadSinkResult,
 } from "@/stores/download-store";
 import type {
   DirectTcpHostConnection,
@@ -314,5 +316,166 @@ describe("download store transport selection", () => {
       message: "File transfer incomplete: expected 6 bytes, received 0.",
     });
     expect(saver.savedFiles).toEqual([]);
+  });
+
+  it("streams files larger than 64 MB directly to the sink with progress and no size cap", async () => {
+    const TWO_GIB = 2 * 1024 * 1024 * 1024;
+    const chunks = [new TextEncoder().encode("chunk-one-"), new TextEncoder().encode("chunk-two")];
+    const written: Uint8Array[] = [];
+    let closed = false;
+    let aborted = false;
+    const shared: Array<{ uri: string; mimeType: string | null; fileName: string }> = [];
+    const sink: DownloadStreamSink = {
+      uri: "file:///cache/big.apk",
+      write: (chunk) => written.push(chunk),
+      close: () => {
+        closed = true;
+      },
+      abort: () => {
+        aborted = true;
+      },
+    };
+    const reader = createFileReader(async () => {
+      throw new Error("buffered readFile should not be called when streaming");
+    });
+
+    await useDownloadStore.getState().startDownload({
+      serverId: "srv_remote",
+      scopeId: "workspace-1",
+      fileName: "big.apk",
+      path: "artifacts/big.apk",
+      daemonProfile: profileWith([relayConnection]),
+      activeConnectionId: relayConnection.id,
+      requestFileDownloadToken: createTokenRequest(TWO_GIB).request,
+      readFile: reader.read,
+      streamFile: async (_path, streamSink) => {
+        const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+        streamSink.onBegin?.({
+          mime: MIME_TYPE,
+          size: total,
+          encoding: "binary",
+          modifiedAt: "2026-11-22T00:00:00.000Z",
+        });
+        for (const chunk of chunks) {
+          streamSink.onChunk(chunk);
+        }
+        return { size: total, bytesWritten: total };
+      },
+      openDownloadSink: (): OpenDownloadSinkResult => ({ kind: "sink", sink }),
+      shareFile: async (uri, mimeType, fileName) => {
+        shared.push({ uri, mimeType, fileName });
+      },
+    });
+
+    const { activeDownloadId, downloads } = useDownloadStore.getState();
+    const download = activeDownloadId ? downloads.get(activeDownloadId) : undefined;
+    expect(download).toMatchObject({ status: "complete" });
+    expect(download?.progress?.percent).toBe(1);
+    expect(written).toEqual(chunks);
+    expect(closed).toBe(true);
+    expect(aborted).toBe(false);
+    expect(reader.requested).toEqual([]);
+    expect(shared).toEqual([
+      { uri: "file:///cache/big.apk", mimeType: MIME_TYPE, fileName: FILE_NAME },
+    ]);
+  });
+
+  it("aborts and cleans up the stream sink when streaming fails mid-transfer", async () => {
+    let closed = false;
+    let aborted = false;
+    const sink: DownloadStreamSink = {
+      uri: "file:///cache/partial.apk",
+      write: () => {},
+      close: () => {
+        closed = true;
+      },
+      abort: () => {
+        aborted = true;
+      },
+    };
+
+    await useDownloadStore.getState().startDownload({
+      serverId: "srv_remote",
+      scopeId: "workspace-1",
+      fileName: "partial.apk",
+      path: "artifacts/partial.apk",
+      daemonProfile: profileWith([relayConnection]),
+      activeConnectionId: relayConnection.id,
+      requestFileDownloadToken: createTokenRequest(1024 * 1024 * 200).request,
+      readFile: createFileReader(async () => ({ bytes: FILE_BYTES, size: FILE_BYTES.byteLength }))
+        .read,
+      streamFile: async (_path, streamSink) => {
+        streamSink.onBegin?.({
+          mime: MIME_TYPE,
+          size: 100,
+          encoding: "binary",
+          modifiedAt: "2026-11-22T00:00:00.000Z",
+        });
+        streamSink.onChunk(FILE_BYTES);
+        throw new Error("Connection lost");
+      },
+      openDownloadSink: (): OpenDownloadSinkResult => ({ kind: "sink", sink }),
+    });
+
+    const { activeDownloadId, downloads } = useDownloadStore.getState();
+    const download = activeDownloadId ? downloads.get(activeDownloadId) : undefined;
+    expect(download).toMatchObject({ status: "error", message: "Connection lost" });
+    expect(closed).toBe(false);
+    expect(aborted).toBe(true);
+  });
+
+  it("dismisses cleanly when the save-file picker is cancelled", async () => {
+    let streamCalled = false;
+    await useDownloadStore.getState().startDownload({
+      serverId: "srv_remote",
+      scopeId: "workspace-1",
+      fileName: FILE_NAME,
+      path: FILE_PATH,
+      daemonProfile: profileWith([relayConnection]),
+      activeConnectionId: relayConnection.id,
+      requestFileDownloadToken: createTokenRequest(1024 * 1024 * 200).request,
+      readFile: createFileReader(async () => ({ bytes: FILE_BYTES, size: FILE_BYTES.byteLength }))
+        .read,
+      streamFile: async () => {
+        streamCalled = true;
+        return { size: 0, bytesWritten: 0 };
+      },
+      openDownloadSink: (): OpenDownloadSinkResult => ({ kind: "cancelled" }),
+    });
+
+    expect(streamCalled).toBe(false);
+    expect(useDownloadStore.getState().downloads.size).toBe(0);
+  });
+
+  it("falls back to buffered readFile when no streaming sink is available", async () => {
+    const reader = createFileReader(async () => ({
+      bytes: FILE_BYTES,
+      size: FILE_BYTES.byteLength,
+    }));
+    const saver = createFileSaver();
+
+    await useDownloadStore.getState().startDownload({
+      serverId: "srv_remote",
+      scopeId: "workspace-1",
+      fileName: FILE_NAME,
+      path: FILE_PATH,
+      daemonProfile: profileWith([relayConnection]),
+      activeConnectionId: relayConnection.id,
+      requestFileDownloadToken: createTokenRequest().request,
+      readFile: reader.read,
+      streamFile: async () => {
+        throw new Error("streamFile should not run when sink is unavailable");
+      },
+      openDownloadSink: (): OpenDownloadSinkResult => ({ kind: "unavailable" }),
+      saveFile: saver.save,
+    });
+
+    const { activeDownloadId, downloads } = useDownloadStore.getState();
+    const download = activeDownloadId ? downloads.get(activeDownloadId) : undefined;
+    expect(download).toMatchObject({ status: "complete" });
+    expect(reader.requested).toEqual([FILE_PATH]);
+    expect(saver.savedFiles).toEqual([
+      { bytes: FILE_BYTES, fileName: FILE_NAME, mimeType: MIME_TYPE },
+    ]);
   });
 });

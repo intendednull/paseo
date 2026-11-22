@@ -31,7 +31,7 @@ export function useFileDownload({
     () => workspaceId?.trim() || normalizedWorkspaceRoot,
     [normalizedWorkspaceRoot, workspaceId],
   );
-  const { requestFileDownloadToken, requestFileBytes } = useFileExplorerActions({
+  const { requestFileDownloadToken, requestFileBytes, streamFileBytes } = useFileExplorerActions({
     serverId,
     workspaceId,
     workspaceRoot: normalizedWorkspaceRoot,
@@ -52,6 +52,7 @@ export function useFileDownload({
         activeConnectionId: getHostRuntimeStore().getSnapshot(serverId)?.activeConnectionId ?? null,
         requestFileDownloadToken: (targetPath) => requestFileDownloadToken(targetPath),
         readFile: requestFileBytes,
+        streamFile: streamFileBytes,
       });
     },
     [
@@ -60,6 +61,7 @@ export function useFileDownload({
       requestFileDownloadToken,
       serverId,
       startDownload,
+      streamFileBytes,
       workspaceScopeId,
     ],
   );

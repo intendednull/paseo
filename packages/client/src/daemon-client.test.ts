@@ -4023,6 +4023,86 @@ test("readFile rejects a binary transfer that exceeds the announced size", async
   });
 });
 
+test("streamFile delivers binary chunks directly to the sink without buffering", async () => {
+  const { mock, client } = await connectFileClient("clsk_file_stream");
+
+  const began: number[] = [];
+  const receivedChunks: string[] = [];
+  const responsePromise = client.streamFile(
+    "/tmp/project",
+    "archive.bin",
+    {
+      onBegin: (info) => {
+        began.push(info.size);
+      },
+      onChunk: (chunk) => {
+        receivedChunks.push(new TextDecoder().decode(chunk));
+      },
+    },
+    { requestId: "req-stream" },
+  );
+
+  sendBinaryFile(mock, "req-stream", 11, ["hello ", "world"]);
+  mock.triggerMessage(
+    encodeFileTransferFrame({ opcode: FileTransferOpcode.FileEnd, requestId: "req-stream" }),
+  );
+
+  const result = await responsePromise;
+  expect(began).toEqual([11]);
+  expect(receivedChunks).toEqual(["hello ", "world"]);
+  expect(result).toMatchObject({
+    path: "archive.bin",
+    size: 11,
+    bytesWritten: 11,
+    kind: "binary",
+  });
+});
+
+test("streamFile rejects immediately when the sink throws on a chunk", async () => {
+  const { mock, client } = await connectFileClient("clsk_file_stream_err");
+
+  const responsePromise = client.streamFile(
+    "/tmp/project",
+    "full-disk.bin",
+    {
+      onChunk: () => {
+        throw new Error("ENOSPC: no space left on device");
+      },
+    },
+    { requestId: "req-stream-err" },
+  );
+
+  sendBinaryFile(mock, "req-stream-err", 5, ["hello"]);
+
+  await expect(responsePromise).rejects.toThrow("ENOSPC: no space left on device");
+});
+
+test("streamFile rejects incomplete transfers", async () => {
+  const { mock, client } = await connectFileClient("clsk_file_stream_short");
+
+  const receivedChunks: number[] = [];
+  const responsePromise = client.streamFile(
+    "/tmp/project",
+    "truncated.bin",
+    {
+      onChunk: (chunk) => {
+        receivedChunks.push(chunk.byteLength);
+      },
+    },
+    { requestId: "req-stream-short" },
+  );
+
+  sendBinaryFile(mock, "req-stream-short", 20, ["hello"]);
+  mock.triggerMessage(
+    encodeFileTransferFrame({ opcode: FileTransferOpcode.FileEnd, requestId: "req-stream-short" }),
+  );
+
+  await expect(responsePromise).rejects.toThrow(
+    "File transfer incomplete: expected 20 bytes, received 5.",
+  );
+  expect(receivedChunks).toEqual([5]);
+});
+
 test("uploadFile sends metadata request and file bytes as binary chunks", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

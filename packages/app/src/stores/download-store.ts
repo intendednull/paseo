@@ -1,7 +1,8 @@
 import { create } from "zustand";
-import { File as FSFile, Paths } from "expo-file-system";
+import { File as FSFile, FileMode, Paths } from "expo-file-system";
 import * as LegacyFileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
+import type { FileStreamSink } from "@getpaseo/client/internal/daemon-client";
 import type { HostProfile } from "@/types/host-connection";
 import { buildDaemonWebSocketUrl } from "@/utils/daemon-endpoints";
 import { isWeb } from "@/constants/platform";
@@ -15,9 +16,23 @@ interface DownloadProgress {
   eta: number;
 }
 
-// The session path holds the file in memory two to three times over (client chunks, the
-// concatenated result, then the Blob or native write). Lift once the client streams chunks to disk.
+// Buffered session fallback limit (used only when streaming directly to disk is unavailable,
+// such as browsers without showSaveFilePicker or callers that only supply readFile).
 export const MAX_SESSION_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+const STREAM_PROGRESS_INTERVAL_MS = 150;
+
+export interface DownloadStreamSink {
+  /** Local file URI to hand to the native share sheet after completion; `null` on web. */
+  readonly uri: string | null;
+  write: (chunk: Uint8Array) => void;
+  close: () => Promise<void> | void;
+  abort: () => Promise<void> | void;
+}
+
+export type OpenDownloadSinkResult =
+  | { kind: "sink"; sink: DownloadStreamSink }
+  | { kind: "cancelled" }
+  | { kind: "unavailable" };
 
 export interface DownloadedBytes {
   bytes: Uint8Array;
@@ -55,8 +70,18 @@ interface DownloadState {
       size: number | null;
       error: string | null;
     }>;
-    /** Reads the whole file over the session socket; used when no direct HTTP endpoint is active. */
+    /** Reads the whole file over the session socket; used as buffered fallback when streaming to disk is unavailable. */
     readFile: (path: string, maxBytes: number) => Promise<{ bytes: Uint8Array; size: number }>;
+    /** Streams the file chunk-by-chunk over the session socket with O(1) memory and no size cap. */
+    streamFile?: (
+      path: string,
+      sink: FileStreamSink,
+      maxBytes?: number,
+    ) => Promise<{ size: number; bytesWritten: number }>;
+    openDownloadSink?: (
+      fileName: string,
+    ) => Promise<OpenDownloadSinkResult> | OpenDownloadSinkResult;
+    shareFile?: typeof shareSavedFile;
     saveFile?: typeof saveDownloadedBytes;
     fetchFile?: typeof fetch;
   }) => Promise<void>;
@@ -85,6 +110,9 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
     activeConnectionId,
     requestFileDownloadToken,
     readFile,
+    streamFile,
+    openDownloadSink = defaultOpenDownloadSink,
+    shareFile = shareSavedFile,
     saveFile = saveDownloadedBytes,
     fetchFile = fetch,
   }) => {
@@ -112,32 +140,27 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
       const resolvedFileName = tokenResponse.fileName ?? fileName;
       const downloadTarget = resolveDaemonDownloadTarget(daemonProfile, activeConnectionId);
       if (!downloadTarget) {
-        // Relay, SSH, socket and pipe hosts have no HTTP endpoint: read the file over the
+        // Relay, SSH, socket and pipe hosts have no HTTP endpoint: transfer the file over the
         // session socket that is already connected (#543).
-        if (
-          typeof tokenResponse.size === "number" &&
-          tokenResponse.size > MAX_SESSION_DOWNLOAD_BYTES
-        ) {
-          throw new Error(
-            i18n.t("composer.errors.fileTooLarge", { fileName: resolvedFileName, size: "64 MB" }),
-          );
-        }
-        const { bytes, size } = await readFile(path, MAX_SESSION_DOWNLOAD_BYTES);
-        // A daemon without a binary channel answers `encoding: "none"` for a binary file: no
-        // content, real size. Never save that as a complete download.
-        if (bytes.byteLength !== size) {
-          throw new Error(
-            `File transfer incomplete: expected ${size} bytes, received ${bytes.byteLength}.`,
-          );
-        }
-        const savedUri = await saveFile({
-          bytes,
-          fileName: resolvedFileName,
+        const outcome = await downloadOverSession({
+          id,
+          path,
+          resolvedFileName,
           mimeType: tokenResponse.mimeType,
+          announcedSize: tokenResponse.size,
+          readFile,
+          streamFile,
+          openDownloadSink,
+          saveFile,
+          onProgress: (progress) => get().updateProgress(id, progress),
         });
+        if (outcome.kind === "cancelled") {
+          get().dismissDownload(id);
+          return;
+        }
         get().completeDownload(id);
-        if (savedUri !== null) {
-          await shareSavedFile(savedUri, tokenResponse.mimeType, resolvedFileName);
+        if (outcome.uri !== null) {
+          await shareFile(outcome.uri, tokenResponse.mimeType, resolvedFileName);
         }
         return;
       }
@@ -357,6 +380,266 @@ async function fetchDownload(fetchFile: typeof fetch, url: string): Promise<Blob
   } catch {
     throw new Error(i18n.t("downloads.failed"));
   }
+}
+
+type SessionDownloadOutcome = { kind: "cancelled" } | { kind: "saved"; uri: string | null };
+
+async function downloadOverSession(params: {
+  id: string;
+  path: string;
+  resolvedFileName: string;
+  mimeType: string | null;
+  announcedSize: number | null;
+  readFile: (path: string, maxBytes: number) => Promise<{ bytes: Uint8Array; size: number }>;
+  streamFile?: (
+    path: string,
+    sink: FileStreamSink,
+    maxBytes?: number,
+  ) => Promise<{ size: number; bytesWritten: number }>;
+  openDownloadSink: (fileName: string) => Promise<OpenDownloadSinkResult> | OpenDownloadSinkResult;
+  saveFile: typeof saveDownloadedBytes;
+  onProgress: (progress: DownloadProgress) => void;
+}): Promise<SessionDownloadOutcome> {
+  if (params.streamFile) {
+    const sinkResult = await params.openDownloadSink(params.resolvedFileName);
+    if (sinkResult.kind === "cancelled") {
+      return { kind: "cancelled" };
+    }
+    if (sinkResult.kind === "sink") {
+      await streamIntoDownloadSink({
+        path: params.path,
+        announcedSize: params.announcedSize,
+        streamFile: params.streamFile,
+        sink: sinkResult.sink,
+        onProgress: params.onProgress,
+      });
+      return { kind: "saved", uri: sinkResult.sink.uri };
+    }
+  }
+
+  if (
+    typeof params.announcedSize === "number" &&
+    params.announcedSize > MAX_SESSION_DOWNLOAD_BYTES
+  ) {
+    throw new Error(
+      i18n.t("composer.errors.fileTooLarge", {
+        fileName: params.resolvedFileName,
+        size: "64 MB",
+      }),
+    );
+  }
+  const { bytes, size } = await params.readFile(params.path, MAX_SESSION_DOWNLOAD_BYTES);
+  // A daemon without a binary channel answers `encoding: "none"` for a binary file: no
+  // content, real size. Never save that as a complete download.
+  if (bytes.byteLength !== size) {
+    throw new Error(
+      `File transfer incomplete: expected ${size} bytes, received ${bytes.byteLength}.`,
+    );
+  }
+  const savedUri = await params.saveFile({
+    bytes,
+    fileName: params.resolvedFileName,
+    mimeType: params.mimeType,
+  });
+  return { kind: "saved", uri: savedUri };
+}
+
+async function streamIntoDownloadSink(params: {
+  path: string;
+  announcedSize: number | null;
+  streamFile: (
+    path: string,
+    sink: FileStreamSink,
+    maxBytes?: number,
+  ) => Promise<{ size: number; bytesWritten: number }>;
+  sink: DownloadStreamSink;
+  onProgress: (progress: DownloadProgress) => void;
+}): Promise<void> {
+  const downloadStartTime = Date.now();
+  let totalBytes =
+    typeof params.announcedSize === "number" && params.announcedSize >= 0
+      ? params.announcedSize
+      : 0;
+  let bytesWritten = 0;
+  let lastProgressAt = 0;
+
+  const reportProgress = (force: boolean) => {
+    if (totalBytes <= 0) {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - lastProgressAt < STREAM_PROGRESS_INTERVAL_MS) {
+      return;
+    }
+    lastProgressAt = now;
+    const elapsed = (now - downloadStartTime) / 1000;
+    const speed = elapsed > 0 ? bytesWritten / elapsed : 0;
+    const remaining = Math.max(0, totalBytes - bytesWritten);
+    const eta = speed > 0 ? remaining / speed : 0;
+    params.onProgress({
+      percent: Math.min(1, bytesWritten / totalBytes),
+      bytesWritten,
+      totalBytes,
+      speed,
+      eta,
+    });
+  };
+
+  try {
+    const result = await params.streamFile(params.path, {
+      onBegin: (info) => {
+        totalBytes = info.size;
+        reportProgress(true);
+      },
+      onChunk: (chunk) => {
+        params.sink.write(chunk);
+        bytesWritten += chunk.byteLength;
+        reportProgress(bytesWritten >= totalBytes);
+      },
+    });
+    if (result.bytesWritten !== result.size) {
+      throw new Error(
+        `File transfer incomplete: expected ${result.size} bytes, received ${result.bytesWritten}.`,
+      );
+    }
+    await params.sink.close();
+  } catch (error) {
+    await params.sink.abort();
+    throw error;
+  }
+}
+
+interface WebFileWritableStream {
+  write: (data: Uint8Array<ArrayBuffer>) => Promise<void>;
+  close: () => Promise<void>;
+  abort: () => Promise<void>;
+}
+
+interface WebFilePickerHandle {
+  createWritable: () => Promise<WebFileWritableStream>;
+}
+
+type ShowSaveFilePickerFn = (options?: { suggestedName?: string }) => Promise<WebFilePickerHandle>;
+
+function toTightUint8Array(chunk: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (
+    chunk.buffer instanceof ArrayBuffer &&
+    chunk.byteOffset === 0 &&
+    chunk.byteLength === chunk.buffer.byteLength
+  ) {
+    return chunk as Uint8Array<ArrayBuffer>;
+  }
+  const copy = new Uint8Array(chunk.byteLength);
+  copy.set(chunk);
+  return copy;
+}
+
+async function defaultOpenDownloadSink(fileName: string): Promise<OpenDownloadSinkResult> {
+  if (isWeb) {
+    const picker =
+      typeof window !== "undefined"
+        ? (window as Window & { showSaveFilePicker?: ShowSaveFilePickerFn }).showSaveFilePicker
+        : undefined;
+    if (typeof picker !== "function") {
+      return { kind: "unavailable" };
+    }
+    try {
+      const fileHandle = await picker({ suggestedName: sanitizeDownloadFileName(fileName) });
+      const writable = await fileHandle.createWritable();
+      let writeChain: Promise<void> = Promise.resolve();
+      let writeError: Error | null = null;
+      let finished = false;
+
+      return {
+        kind: "sink",
+        sink: {
+          uri: null,
+          write: (chunk) => {
+            if (writeError) {
+              throw writeError;
+            }
+            if (chunk.byteLength === 0) {
+              return;
+            }
+            const tight = toTightUint8Array(chunk);
+            writeChain = writeChain.then(async () => {
+              try {
+                await writable.write(tight);
+              } catch (error) {
+                writeError = error instanceof Error ? error : new Error(String(error));
+              }
+              return undefined;
+            });
+          },
+          close: async () => {
+            if (finished) {
+              return;
+            }
+            finished = true;
+            await writeChain;
+            if (writeError) {
+              await writable.abort().catch(() => {});
+              throw writeError;
+            }
+            await writable.close();
+          },
+          abort: async () => {
+            if (finished) {
+              return;
+            }
+            finished = true;
+            await writeChain.catch(() => {});
+            await writable.abort().catch(() => {});
+          },
+        },
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        return { kind: "cancelled" };
+      }
+      return { kind: "unavailable" };
+    }
+  }
+
+  const targetFile = resolveDownloadTargetFile(fileName);
+  targetFile.create({ overwrite: true });
+  const handle = targetFile.open(FileMode.Truncate);
+  let closed = false;
+  const closeHandle = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    handle.close();
+  };
+
+  return {
+    kind: "sink",
+    sink: {
+      uri: targetFile.uri,
+      write: (chunk) => {
+        if (chunk.byteLength === 0) {
+          return;
+        }
+        handle.writeBytes(toTightUint8Array(chunk));
+      },
+      close: closeHandle,
+      abort: () => {
+        try {
+          closeHandle();
+        } catch {
+          // Best-effort close before removing a partial download.
+        }
+        try {
+          if (targetFile.exists) {
+            targetFile.delete();
+          }
+        } catch {
+          // Best-effort cleanup of a partial download.
+        }
+      },
+    },
+  };
 }
 
 /**
