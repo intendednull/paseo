@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import type { FileStreamOptions, FileStreamSink } from "@getpaseo/client/internal/daemon-client";
 import { useSessionStore, type AgentFileExplorerState } from "@/stores/session-store";
 import { usePanelStore } from "@/stores/panel-store";
 import { revealExplorerDirectory } from "@/file-explorer/tree";
@@ -165,6 +166,24 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
     [client, normalizedWorkspaceRoot, t],
   );
 
+  const streamFileBytes = useCallback(
+    async (path: string, sink: FileStreamSink, options?: Omit<FileStreamOptions, "requestId">) => {
+      if (!normalizedWorkspaceRoot) {
+        throw new Error(t("workspace.fileExplorer.states.unavailable"));
+      }
+      if (!client) {
+        throw new Error(t("workspace.terminal.hostDisconnected"));
+      }
+      // Disable overall request timeout so lengthy active transfers over a relay can finish;
+      // DaemonClient.streamFile enforces a sliding inactivity timeout and AbortSignal cancellation.
+      return client.streamFile(normalizedWorkspaceRoot, path, sink, {
+        ...options,
+        timeout: options?.timeout ?? 0,
+      });
+    },
+    [client, normalizedWorkspaceRoot, t],
+  );
+
   const createEntry = useCallback(
     async (input: { parentPath: string; name: string; kind: "file" | "directory" }) => {
       if (!client || !normalizedWorkspaceRoot) {
@@ -262,6 +281,7 @@ export function useFileExplorerActions(params: { serverId: string } & FileExplor
     invalidateDirectoryListings,
     requestFileDownloadToken,
     requestFileBytes,
+    streamFileBytes,
     createEntry,
     renameEntry,
     duplicateEntry,
