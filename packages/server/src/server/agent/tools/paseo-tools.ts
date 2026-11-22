@@ -2134,13 +2134,6 @@ function createToolCatalog(
     },
     async ({ agentId, instructions }) => {
       const isProtected = (targetId: string): boolean => {
-        if (options.finishSubscriptions) {
-          try {
-            if (options.finishSubscriptions().hasPendingForCaller(targetId)) return true;
-          } catch {
-            // Standalone tool catalogs may not wire finish subscriptions.
-          }
-        }
         if (options.agentMessages) {
           try {
             if (options.agentMessages().hasPending(targetId)) return true;

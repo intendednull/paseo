@@ -1546,10 +1546,13 @@ export async function createPaseoDaemon(
     }),
   });
 
+  const hasPendingAgentMessages = (agentId: string) =>
+    wsServer?.agentMessages.hasPending(agentId) ?? false;
   const isProtectedFromInterruption = (agentId: string) =>
-    finishSubscriptions.hasPendingForCaller(agentId) ||
-    (wsServer?.agentMessages.hasPending(agentId) ?? false);
-  agentManager.setCompactionProtectionCheck(isProtectedFromInterruption);
+    finishSubscriptions.hasPendingForCaller(agentId) || hasPendingAgentMessages(agentId);
+  agentManager.setCompactionProtectionCheck((agentId, trigger) =>
+    trigger === "auto" ? isProtectedFromInterruption(agentId) : hasPendingAgentMessages(agentId),
+  );
 
   const idleRuntimeCleanup = createIdleRuntimeCleanup({
     enabled: daemonConfigStore.get().idleRuntimeCleanup !== false,
