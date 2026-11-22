@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { getAgentStreamEventTurnId, type AgentStreamEvent } from "./agent-sdk-types.js";
+import {
+  AgentTurnBusyError,
+  getAgentStreamEventTurnId,
+  type AgentStreamEvent,
+} from "./agent-sdk-types.js";
 
 export interface ForegroundTurnWaiter {
   turnId: string;
@@ -13,7 +17,7 @@ export interface ForegroundTurnWaiter {
 type ForegroundRunStart =
   | { status: "pending" }
   | { status: "started"; turnId: string }
-  | { status: "failed"; error: string; stale?: true };
+  | { status: "failed"; error: string; stale?: true; busy?: true };
 
 export interface PendingForegroundRun {
   token: string;
@@ -391,7 +395,12 @@ export class ForegroundPromptStart {
     // A stale-session failure is retried with a new run; wait for it unless dispatch ended.
     if (run?.start.status === "failed" && run.start.stale && !ended) return;
     this.done = true;
-    this.rejectStarted(new Error(this.describeUnstarted(run)));
+    const message = this.describeUnstarted(run);
+    this.rejectStarted(
+      run?.start.status === "failed" && run.start.busy
+        ? new AgentTurnBusyError(message)
+        : new Error(message),
+    );
   }
 
   private describeUnstarted(run: PendingForegroundRun | null): string {

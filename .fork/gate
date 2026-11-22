@@ -17,7 +17,9 @@ npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/app --works
 (cd packages/server && npx vitest run \
   src/server/speech/providers/openai src/server/session/voice \
   src/server/agent/agent-compact.test.ts src/server/agent/idle-compaction \
-  src/server/agent/provider-registry-wrap.test.ts)
+  src/server/agent/agent-run-state.test.ts \
+  src/server/agent/provider-registry-wrap.test.ts \
+  src/server/agent/providers/acp-agent.test.ts)
 (cd packages/app && npx vitest run --project unit \
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \

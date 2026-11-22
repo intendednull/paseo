@@ -2277,10 +2277,7 @@ export class AgentManager {
         contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
         isEligible,
         hasLiveDescendant: () => this.findLiveDescendantBlockerSync(agent) !== null,
-        supportsCompaction:
-          agent.provider === "claude"
-            ? agent.session.supportsCompaction?.bind(agent.session)
-            : () => false,
+        supportsCompaction: agent.session.supportsCompaction?.bind(agent.session),
         canStopRuntime: agent.session.canStopRuntime?.bind(agent.session),
         compactIfEligible: async (revalidate) => {
           try {
@@ -3593,7 +3590,9 @@ export class AgentManager {
       throw new Error(tracker.turnError);
     }
     if (!tracker.sawCompactionCompleted) {
-      throw new Error("Compaction did not complete (no compact_boundary received from provider)");
+      throw new Error(
+        "Compaction did not complete (no compaction confirmation received from provider)",
+      );
     }
     return {
       contextTokensBefore: tracker.observedPreTokens ?? options.preUsageTokens ?? null,
@@ -3602,9 +3601,6 @@ export class AgentManager {
   }
 
   private async assertCompactionSupported(agent: LiveManagedAgent): Promise<void> {
-    if (agent.provider !== "claude") {
-      throw new AgentCompactionUnsupportedError(agent.provider);
-    }
     const supported = agent.session.supportsCompaction
       ? (await withTimeout(
           Promise.resolve(agent.session.supportsCompaction()),
@@ -3636,6 +3632,12 @@ export class AgentManager {
     });
 
     await this.assertCompactionSupported(agent);
+    if (instructions !== undefined && agent.session.supportsCompactionInstructions !== true) {
+      throw new AgentCompactionRefusedError(
+        "not_eligible",
+        `Compaction instructions are not supported for ${agent.provider}`,
+      );
+    }
 
     this.assertAgentSafeForCompaction(agent, {
       trigger,
@@ -3710,16 +3712,21 @@ export class AgentManager {
     });
   }
 
-  private abortPendingCompactionStart(
+  private isSilentPendingStartAbort(error: unknown): error is Error {
+    return error instanceof AgentCompactionAdmitError || error instanceof AgentTurnBusyError;
+  }
+
+  private abortPendingStartWithoutFailure(
     agent: ActiveManagedAgent,
     agentId: string,
     pendingRun: PendingForegroundRun,
-    error: AgentCompactionAdmitError,
+    error: Error,
   ): never {
     if (!pendingRun.settled) {
       this.runs.settleForegroundStart(pendingRun, {
         status: "failed",
         error: error.message,
+        ...(error instanceof AgentTurnBusyError ? { busy: true as const } : {}),
       });
       agent.pendingReplacement = false;
       if (!agent.activeForegroundTurnId) agent.lifecycle = "idle";
@@ -3742,7 +3749,7 @@ export class AgentManager {
       return null;
     }
     if (options?.admitBeforeDispatch?.() === false) {
-      this.abortPendingCompactionStart(
+      this.abortPendingStartWithoutFailure(
         agent,
         agentId,
         pendingRun,
@@ -3756,8 +3763,8 @@ export class AgentManager {
       }
       return result.turnId;
     } catch (error) {
-      if (error instanceof AgentCompactionAdmitError) {
-        this.abortPendingCompactionStart(agent, agentId, pendingRun, error);
+      if (this.isSilentPendingStartAbort(error)) {
+        this.abortPendingStartWithoutFailure(agent, agentId, pendingRun, error);
       }
       if (error instanceof AgentTurnStartCanceledError) {
         if (!pendingRun.settled) {
@@ -3886,6 +3893,11 @@ export class AgentManager {
       },
       "agent.manager.stream.request",
     );
+    if (existingAgent.session.isCompactionQuarantined?.()) {
+      throw new AgentTurnBusyError(
+        `Agent ${agentId} is quarantined after an ambiguous compaction outcome`,
+      );
+    }
     if (existingAgent.activeForegroundTurnId || this.runs.hasRun(agentId)) {
       this.logger.trace(
         {
@@ -4093,7 +4105,12 @@ export class AgentManager {
     options?: AgentRunOptions,
     promptStart?: ForegroundPromptStart,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
-    this.requireSessionAgent(agentId);
+    const agent = this.requireSessionAgent(agentId);
+    if (agent.session.isCompactionQuarantined?.()) {
+      throw new AgentTurnBusyError(
+        `Agent ${agentId} is quarantined after an ambiguous compaction outcome`,
+      );
+    }
     return this.replaceRunInForegroundLane(agentId, prompt, options, promptStart);
   }
 
@@ -4103,6 +4120,9 @@ export class AgentManager {
     options?: AgentSteerOptions,
   ): Promise<SteerResult> {
     const agent = this.requireSessionAgent(agentId);
+    if (agent.session.isCompactionQuarantined?.()) {
+      return { status: "unavailable" };
+    }
     const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
     if (!expectedTurnId || !agent.session.steerActiveTurn) {
       return { status: "unavailable" };

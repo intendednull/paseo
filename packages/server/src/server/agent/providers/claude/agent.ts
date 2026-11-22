@@ -3220,6 +3220,8 @@ class ClaudeAgentSession implements AgentSession {
     return this.persistence;
   }
 
+  readonly supportsCompactionInstructions = true;
+
   supportsCompaction(): boolean {
     return true;
   }

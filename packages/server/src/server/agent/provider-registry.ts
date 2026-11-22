@@ -478,6 +478,10 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     stopBackgroundWork: inner.stopBackgroundWork?.bind(inner),
     close: () => inner.close(),
     supportsCompaction: inner.supportsCompaction?.bind(inner),
+    get supportsCompactionInstructions() {
+      return inner.supportsCompactionInstructions;
+    },
+    isCompactionQuarantined: inner.isCompactionQuarantined?.bind(inner),
     canStopRuntime: inner.canStopRuntime?.bind(inner),
     listCommands: inner.listCommands?.bind(inner),
     setModel: inner.setModel?.bind(inner),

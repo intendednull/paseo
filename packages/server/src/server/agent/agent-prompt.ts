@@ -24,7 +24,9 @@ export type AgentRunController = Pick<
   reloadAgentSession(agentId: string): Promise<unknown>;
 };
 
-export class AgentTurnBusyError extends Error {}
+import { AgentTurnBusyError } from "./agent-sdk-types.js";
+
+export { AgentTurnBusyError };
 
 export interface StartAgentRunOptions {
   idleOnly?: boolean;

@@ -30,6 +30,7 @@ const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
   "revertFiles",
   "revertBoth",
   "tryHandleOutOfBand",
+  "isCompactionQuarantined",
 ] as const satisfies readonly OptionalAgentSessionMethodName[];
 
 type MissingOptionalAgentSessionMethod = Exclude<
@@ -139,9 +140,16 @@ class FakeSession implements AgentSession {
     this.recordedCalls.push("close");
   }
 
+  readonly supportsCompactionInstructions = true;
+
   supportsCompaction() {
     this.recordedCalls.push("supportsCompaction");
     return true;
+  }
+
+  isCompactionQuarantined() {
+    this.recordedCalls.push("isCompactionQuarantined");
+    return false;
   }
 
   async listCommands() {
@@ -196,6 +204,8 @@ describe("wrapSessionProvider", () => {
 
     await wrapped.steerActiveTurn?.("follow-up", { expectedTurnId: "turn-1" });
     expect(wrapped.supportsCompaction?.()).toBe(true);
+    expect(wrapped.supportsCompactionInstructions).toBe(true);
+    expect(wrapped.isCompactionQuarantined?.()).toBe(false);
     await wrapped.listCommands?.();
     await wrapped.setModel?.("sonnet");
     await wrapped.setThinkingOption?.("high");
@@ -212,6 +222,7 @@ describe("wrapSessionProvider", () => {
     expect(session.recordedCalls).toEqual([
       "steerActiveTurn",
       "supportsCompaction",
+      "isCompactionQuarantined",
       "listCommands",
       "setModel",
       "setThinkingOption",
@@ -252,8 +263,10 @@ describe("wrapSessionProvider", () => {
     const session: AgentSession = new FakeSession();
     session.steerActiveTurn = undefined;
     session.supportsCompaction = undefined;
+    session.isCompactionQuarantined = undefined;
     const wrapped = wrapSessionProvider("custom-claude", session);
     expect(wrapped.steerActiveTurn).toBeUndefined();
     expect(wrapped.supportsCompaction).toBeUndefined();
+    expect(wrapped.isCompactionQuarantined).toBeUndefined();
   });
 });

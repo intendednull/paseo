@@ -1870,6 +1870,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private pendingUserMessage: PendingUserMessage | null = null;
   private submittedUserMessageTurnId: string | null = null;
   private readonly toolCalls = new Map<string, ACPToolSnapshot>();
+  private readonly liveActiveToolCallIds = new Set<string>();
   private readonly terminalEntries = new Map<string, TerminalEntry>();
   private readonly persistedHistory: AgentTimelineItem[] = [];
   private readonly initialHandle?: AgentPersistenceHandle;
@@ -2023,6 +2024,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         );
         this.deliverTranslatedEvents(this.flushPendingUserMessage());
         this.replayingHistory = false;
+        this.liveActiveToolCallIds.clear();
         this.historyPending = this.persistedHistory.length > 0;
         this.applySessionState(response);
       } else if (sessionCapabilities?.resume) {
@@ -2791,10 +2793,12 @@ export class ACPAgentSession implements AgentSession, ACPClient {
 
   async canStopRuntime(): Promise<boolean> {
     return (
+      !this.closed &&
       this.activeForegroundTurnId === null &&
       this.pendingPermissions.size === 0 &&
       this.pendingUserMessage === null &&
-      !Array.from(this.terminalEntries.values()).some((terminal) => terminal.running)
+      !Array.from(this.terminalEntries.values()).some((terminal) => terminal.running) &&
+      this.liveActiveToolCallIds.size === 0
     );
   }
 
@@ -3455,6 +3459,13 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       snapshot = this.toolSnapshotTransformer(snapshot);
     }
     this.toolCalls.set(toolCallId, snapshot);
+    if (!this.replayingHistory) {
+      if (snapshot.status === "completed" || snapshot.status === "failed") {
+        this.liveActiveToolCallIds.delete(toolCallId);
+      } else {
+        this.liveActiveToolCallIds.add(toolCallId);
+      }
+    }
     if (update.status === "completed" || update.status === "failed") {
       this.cancelPendingPermissions((pending) => pending.toolCallId === toolCallId);
     }
@@ -3741,6 +3752,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     for (const snapshot of this.toolCalls.values()) {
       const mapped = mapToolSnapshotToTimeline(snapshot, this.terminalEntries);
       if (mapped.status === "running") {
+        this.liveActiveToolCallIds.delete(snapshot.toolCallId);
         this.pushEvent(
           this.wrapTimeline({
             ...mapped,
