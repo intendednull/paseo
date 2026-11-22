@@ -54,7 +54,7 @@ class FakeCandidateRuntime {
   readonly identity = {};
   busy = false;
   activity = 0;
-  contextTokens: number | undefined = 250_000;
+  contextTokens: number | undefined = 450_000;
   postCompactTokens: number | null = 20_000;
   supportsCompaction = true;
   parentAgentId: string | undefined;
@@ -96,7 +96,7 @@ class FakeCandidateRuntime {
           sessionId: `sess-${this.id}`,
           contextTokensBefore: before,
           contextTokensAfter: this.postCompactTokens,
-          contextWindowMaxTokens: 200_000,
+          contextWindowMaxTokens: 1_000_000,
           updatedAtAfter: this.activity,
         };
       },
@@ -152,10 +152,10 @@ function createScenario(settings: Partial<IdleCompactionSettings> = {}) {
 }
 
 describe("idle auto-compaction per-provider policy", () => {
-  test("enables Claude by default at 54m / 60m window / 200k tokens and keeps unverified providers opt-in", () => {
+  test("enables Claude by default at 54m / 60m window / 400k tokens and keeps unverified providers opt-in", () => {
     expect(DEFAULT_IDLE_COMPACTION_SETTINGS).toEqual({
       enabled: true,
-      minContextTokens: 200_000,
+      minContextTokens: 400_000,
     });
     expect(DEFAULT_IDLE_COMPACTION_PROVIDERS).toEqual({
       claude: { enabled: true, idleMinutes: 54, maxIdleMinutes: 60 },
@@ -165,7 +165,7 @@ describe("idle auto-compaction per-provider policy", () => {
       {
         idleMinutes: 54,
         maxIdleMinutes: 60,
-        minContextTokens: 200_000,
+        minContextTokens: 400_000,
       },
     );
     // Non-Claude providers are disabled by default (opt-in via providers.<id>).
@@ -191,7 +191,7 @@ describe("idle auto-compaction per-provider policy", () => {
       resolveProviderIdleCompactionPolicy(
         {
           enabled: true,
-          minContextTokens: 200_000,
+          minContextTokens: 400_000,
           providers: {
             claude: { idleMinutes: 4 },
             codex: { enabled: true, idleMinutes: 20, maxIdleMinutes: 25 },
@@ -200,24 +200,24 @@ describe("idle auto-compaction per-provider policy", () => {
         },
         "claude",
       ),
-    ).toEqual({ idleMinutes: 4, maxIdleMinutes: 5, minContextTokens: 200_000 });
+    ).toEqual({ idleMinutes: 4, maxIdleMinutes: 5, minContextTokens: 400_000 });
     expect(
       resolveProviderIdleCompactionPolicy(
         {
           enabled: true,
-          minContextTokens: 200_000,
+          minContextTokens: 400_000,
           providers: {
             codex: { enabled: true, idleMinutes: 20, maxIdleMinutes: 25 },
           },
         },
         "codex",
       ),
-    ).toEqual({ idleMinutes: 20, maxIdleMinutes: 25, minContextTokens: 200_000 });
+    ).toEqual({ idleMinutes: 20, maxIdleMinutes: 25, minContextTokens: 400_000 });
     expect(
       resolveProviderIdleCompactionPolicy(
         {
           enabled: true,
-          minContextTokens: 200_000,
+          minContextTokens: 400_000,
           providers: {
             broken: { enabled: true, idleMinutes: 10, maxIdleMinutes: 10 },
           },
@@ -269,7 +269,7 @@ describe("idle auto-compaction per-provider policy", () => {
           agentId: "agent-claude",
           idleThresholdMinutes: 54,
           maxIdleMinutes: 60,
-          contextTokensBefore: 250_000,
+          contextTokensBefore: 450_000,
           contextTokensAfter: 20_000,
         }),
       }),
@@ -349,7 +349,7 @@ describe("idle auto-compaction per-provider policy", () => {
 
   test("skips sessions below the minimum context size threshold", async () => {
     const s = createScenario();
-    s.runtime.contextTokens = 199_999;
+    s.runtime.contextTokens = 399_999;
     expect((await s.sweepAtMinutes(55)).compacted).toEqual([]);
     expect(s.runtime.compactions).toBe(0);
 
@@ -555,20 +555,20 @@ describe("AgentManager + daemon config integration", () => {
               type: "compaction",
               status: "completed",
               trigger: "manual",
-              preTokens: 220_000,
+              preTokens: 420_000,
             },
           });
           emit({
             type: "usage_updated",
             provider: "claude",
             turnId,
-            usage: { contextWindowUsedTokens: 15_000, contextWindowMaxTokens: 200_000 },
+            usage: { contextWindowUsedTokens: 15_000, contextWindowMaxTokens: 1_000_000 },
           });
           emit({
             type: "turn_completed",
             provider: "claude",
             turnId,
-            usage: { contextWindowUsedTokens: 15_000, contextWindowMaxTokens: 200_000 },
+            usage: { contextWindowUsedTokens: 15_000, contextWindowMaxTokens: 1_000_000 },
           });
         });
         return { turnId };
@@ -613,7 +613,7 @@ describe("AgentManager + daemon config integration", () => {
     emit({
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 220_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 420_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager.flush();
 
@@ -673,7 +673,7 @@ describe("AgentManager + daemon config integration", () => {
     expect(timeline.rows.map((row) => row.item)).toContainEqual({
       type: "notification",
       level: "info",
-      message: "Auto-compacted idle session before prompt cache expiry (220,000 -> 15,000 tokens).",
+      message: "Auto-compacted idle session before prompt cache expiry (420,000 -> 15,000 tokens).",
     });
   });
 
@@ -761,7 +761,7 @@ describe("AgentManager + daemon config integration", () => {
     emit({
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 220_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 420_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager.flush();
 
@@ -818,20 +818,20 @@ describe("AgentManager + daemon config integration", () => {
               type: "compaction",
               status: "completed",
               trigger: "manual",
-              preTokens: 220_000,
+              preTokens: 420_000,
             },
           });
           emit({
             type: "usage_updated",
             provider,
             turnId,
-            usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 200_000 },
+            usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 1_000_000 },
           });
           emit({
             type: "turn_completed",
             provider,
             turnId,
-            usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 200_000 },
+            usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 1_000_000 },
           });
         });
         return { turnId };
@@ -877,7 +877,7 @@ describe("AgentManager + daemon config integration", () => {
     emit({
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 220_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 420_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager.flush();
 
@@ -902,7 +902,7 @@ describe("AgentManager + daemon config integration", () => {
     emit({
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 225_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 425_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager.flush();
 
@@ -957,20 +957,20 @@ describe("AgentManager + daemon config integration", () => {
                 type: "compaction",
                 status: "completed",
                 trigger: "manual",
-                preTokens: 220_000,
+                preTokens: 420_000,
               },
             });
             emitFor(id, {
               type: "usage_updated",
               provider: "claude",
               turnId,
-              usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 200_000 },
+              usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 1_000_000 },
             });
             emitFor(id, {
               type: "turn_completed",
               provider: "claude",
               turnId,
-              usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 200_000 },
+              usage: { contextWindowUsedTokens: 16_000, contextWindowMaxTokens: 1_000_000 },
             });
           });
           return { turnId };
@@ -1059,7 +1059,7 @@ describe("AgentManager + daemon config integration", () => {
     emitFor(rootSessionId, {
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 220_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 420_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager2.flush();
 
@@ -1084,7 +1084,7 @@ describe("AgentManager + daemon config integration", () => {
     emitFor(rootSessionId, {
       type: "usage_updated",
       provider: "claude",
-      usage: { contextWindowUsedTokens: 225_000, contextWindowMaxTokens: 200_000 },
+      usage: { contextWindowUsedTokens: 425_000, contextWindowMaxTokens: 1_000_000 },
     });
     await manager2.flush();
 
@@ -1104,7 +1104,7 @@ describe("AgentManager + daemon config integration", () => {
     const defaultCfg = loadConfig(paseoHome, { env: {} });
     expect(defaultCfg.idleCompaction).toEqual({
       enabled: true,
-      minContextTokens: 200_000,
+      minContextTokens: 400_000,
     });
 
     const toMutable = (cfg: { idleCompaction?: IdleCompactionSettings }) =>
@@ -1163,7 +1163,7 @@ describe("AgentManager + daemon config integration", () => {
     });
     expect(idleCompaction.getSettings()).toEqual({
       enabled: true,
-      minContextTokens: 200_000,
+      minContextTokens: 400_000,
       providers: {
         claude: { idleMinutes: 4 },
         codex: { idleMinutes: 60 },
