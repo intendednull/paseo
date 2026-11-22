@@ -4,6 +4,7 @@ const pkg = require("./package.json");
 const withAndroidAsyncStorageSize = require("./plugins/with-android-async-storage-size");
 const withAndroidOptionalCamera = require("./plugins/with-android-optional-camera");
 const withAndroidProfileable = require("./plugins/with-android-profileable");
+const withAndroidReleaseSigning = require("./plugins/with-android-release-signing");
 const withFdroidAutolinking = require("./plugins/with-fdroid-autolinking");
 const withPasteInput = require("./plugins/with-paste-input");
 const withAndroidScroll = require("./modules/paseo-scroll/app.plugin");
@@ -92,6 +93,10 @@ const variants = {
       envKey: "GOOGLE_SERVICE_INFO_PLIST_DEBUG",
       fallbackRelativePath: "./.secrets/GoogleService-Info.debug.plist",
     }),
+  },
+  fork: {
+    name: "Paseo (fork)",
+    packageId: "sh.paseo.fork",
   },
 };
 
@@ -186,6 +191,7 @@ export default {
       ],
       ...buildProfile.fdroidPlugins,
       ...(isProfileBuild || isWatchdogBuild ? [withAndroidProfileable] : []),
+      ...(process.env.PASEO_ANDROID_SIGNING_KEYSTORE ? [withAndroidReleaseSigning] : []),
     ],
     experiments: {
       typedRoutes: true,
