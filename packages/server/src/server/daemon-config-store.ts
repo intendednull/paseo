@@ -809,18 +809,10 @@ function mergeIdleCompactionPatch(
   existing: NonNullable<PersistedConfig["agents"]>["idleCompaction"],
   patch: NonNullable<SupportedMutableConfigPatch["idleCompaction"]>,
 ): NonNullable<PersistedConfig["agents"]>["idleCompaction"] {
-  const mergedProviders =
-    existing?.providers || patch.providers
-      ? deepMerge(
-          (existing?.providers ?? {}) as Record<string, unknown>,
-          (patch.providers ?? {}) as Record<string, unknown>,
-        )
-      : undefined;
-  return {
-    ...existing,
-    ...patch,
-    ...(mergedProviders !== undefined ? { providers: mergedProviders } : {}),
-  } as NonNullable<PersistedConfig["agents"]>["idleCompaction"];
+  return deepMerge(
+    (existing ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as NonNullable<PersistedConfig["agents"]>["idleCompaction"];
 }
 
 function hasMutableAgentPatch(

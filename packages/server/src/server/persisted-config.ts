@@ -17,6 +17,7 @@ import {
   writePrivateFileAtomicSync,
 } from "./private-files.js";
 import { AgentProfileSchema, AgentSkillSelectionSchema } from "@getpaseo/protocol/agent-profile";
+import { IdleCompactionInstructionsSchema } from "@getpaseo/protocol/messages";
 import { PluginIdSchema, PluginSourceSchema } from "@getpaseo/protocol/plugin-config";
 import { TerminalProfileSchema } from "@getpaseo/protocol/terminal-profile";
 import { PaseoServicePortAllocationSchema } from "@getpaseo/protocol/paseo-config-schema";
@@ -197,6 +198,7 @@ const IdleCompactionProviderConfigSchema = z
       .max(24 * 60)
       .optional(),
     minContextTokens: z.number().int().positive().optional(),
+    instructions: IdleCompactionInstructionsSchema.optional(),
   })
   .strict();
 
@@ -214,6 +216,7 @@ const IdleCompactionConfigSchema = z
       .max(24 * 60)
       .optional(),
     minContextTokens: z.number().int().positive().optional(),
+    instructions: IdleCompactionInstructionsSchema.optional(),
     providers: z.record(z.string().min(1), IdleCompactionProviderConfigSchema).optional(),
   })
   .strict();

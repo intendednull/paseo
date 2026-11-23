@@ -53,6 +53,7 @@ The commit trailers are authoritative; this is the summary.
 | feat(server): allow manual compact_agent with children   | upstream allows manual compaction with live children     |
 | feat(server): raise idle auto-compaction minimum to 400k | upstream ships per-provider idle auto-compaction         |
 | feat(app): stream large session file downloads to disk   | upstream streams session downloads directly to disk      |
+| feat(server): send focus instructions on idle compaction | upstream supports focus instructions for idle compaction |
 
 ## Branches
 

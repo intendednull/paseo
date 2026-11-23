@@ -209,6 +209,25 @@ const MutableRelayConfigSchema = z
   })
   .passthrough();
 
+/**
+ * Single-line idle compaction focus argument: rejects C0/DEL/C1 controls
+ * (including CR, LF, NEL, record/unit separators), Unicode line/paragraph
+ * separators (U+2028/U+2029), and Claude transcript command sentinel tags
+ * that would break `<command-args>` history framing. Uses explicit ASCII
+ * case classes (no regex flags) because zod-aot drops RegExp flags during
+ * codegen. Allows empty string as an explicit opt-out.
+ */
+export const IDLE_COMPACTION_INSTRUCTIONS_PATTERN =
+  // eslint-disable-next-line no-control-regex
+  /^(?!.*<\/?(?:[cC][oO][mM][mM][aA][nN][dD]-(?:[aA][rR][gG][sS]|[nN][aA][mM][eE]|[mM][eE][sS][sS][aA][gG][eE])|[lL][oO][cC][aA][lL]-[cC][oO][mM][mM][aA][nN][dD]-(?:[sS][tT][dD][oO][uU][tT]|[sS][tT][dD][eE][rR][rR]|[cC][aA][vV][eE][aA][tT])|[tT][aA][sS][kK]-[nN][oO][tT][iI][fF][iI][cC][aA][tT][iI][oO][nN])\b)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]*$/;
+
+export const IdleCompactionInstructionsSchema = z
+  .string()
+  .regex(
+    IDLE_COMPACTION_INSTRUCTIONS_PATTERN,
+    "Idle compaction instructions must be a single line without control characters or Claude command sentinel tags",
+  );
+
 export const MutableIdleCompactionProviderConfigSchema = z.object({
   enabled: z.boolean().optional(),
   idleMinutes: z
@@ -222,6 +241,7 @@ export const MutableIdleCompactionProviderConfigSchema = z.object({
     .max(24 * 60)
     .optional(),
   minContextTokens: z.number().int().positive().optional(),
+  instructions: IdleCompactionInstructionsSchema.optional(),
 });
 
 export const MutableIdleCompactionConfigSchema = z.object({
@@ -237,6 +257,7 @@ export const MutableIdleCompactionConfigSchema = z.object({
     .max(24 * 60)
     .optional(),
   minContextTokens: z.number().int().positive().optional(),
+  instructions: IdleCompactionInstructionsSchema.optional(),
   providers: z.record(z.string().min(1), MutableIdleCompactionProviderConfigSchema).optional(),
 });
 

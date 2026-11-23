@@ -372,6 +372,8 @@ describe("AgentManager.compactAgent", () => {
 
     const result = await manager.compactAgent(agent.id);
 
+    // Manual compaction without explicit instructions sends plain /compact (not auto-compaction defaults).
+    expect(session.prompts).toEqual(["/compact"]);
     expect(result.contextTokensBefore).toBe(198_500);
     expect(result.contextTokensAfter).toBeNull();
   });
