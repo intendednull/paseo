@@ -1,3 +1,4 @@
+import { IDLE_COMPACTION_INSTRUCTIONS_PATTERN } from "@getpaseo/protocol/messages";
 import type { Logger } from "pino";
 import { withTimeout } from "../../../utils/promise-timeout.js";
 
@@ -6,6 +7,7 @@ export interface IdleCompactionProviderSettings {
   idleMinutes?: number;
   maxIdleMinutes?: number;
   minContextTokens?: number;
+  instructions?: string;
 }
 
 export interface IdleCompactionSettings {
@@ -13,6 +15,7 @@ export interface IdleCompactionSettings {
   minContextTokens: number;
   idleMinutes?: number;
   maxIdleMinutes?: number;
+  instructions?: string;
   providers?: Record<string, IdleCompactionProviderSettings>;
 }
 
@@ -20,7 +23,15 @@ export interface ResolvedProviderIdleCompactionPolicy {
   idleMinutes: number;
   maxIdleMinutes: number;
   minContextTokens: number;
+  instructions?: string;
 }
+
+/**
+ * Default focus instructions sent with automatic idle compaction on providers
+ * that support compaction instructions (e.g. Claude `/compact <instructions>`).
+ */
+export const DEFAULT_IDLE_COMPACTION_INSTRUCTIONS =
+  "Preserve everything needed to continue: your role and standing rules, current tasks and their state, any running workers/sessions with their ids and what they're doing, open decisions and questions, owed work, and next steps. Note the path of your handoff file if you keep one.";
 
 /**
  * Default per-provider idle compaction settings.
@@ -43,12 +54,14 @@ export const DEFAULT_IDLE_COMPACTION_PROVIDERS: Readonly<
 });
 
 /**
- * Operator's chosen default minimum context floor (400k tokens), paired with
- * per-provider idle thresholds in `DEFAULT_IDLE_COMPACTION_PROVIDERS`.
+ * Operator's chosen default minimum context floor (400k tokens) and default
+ * handoff focus instructions, paired with per-provider idle thresholds in
+ * `DEFAULT_IDLE_COMPACTION_PROVIDERS`.
  */
 export const DEFAULT_IDLE_COMPACTION_SETTINGS: Readonly<IdleCompactionSettings> = Object.freeze({
   enabled: true,
   minContextTokens: 400_000,
+  instructions: DEFAULT_IDLE_COMPACTION_INSTRUCTIONS,
 });
 
 export interface IdleCompactionOutcome {
@@ -78,8 +91,12 @@ export interface IdleCompactionCandidate {
    */
   hasLiveDescendant?(): boolean;
   supportsCompaction?(): Promise<boolean> | boolean;
+  readonly supportsCompactionInstructions?: boolean;
   canStopRuntime?(): Promise<boolean>;
-  compactIfEligible(revalidate: () => boolean): Promise<IdleCompactionOutcome | null>;
+  compactIfEligible(
+    revalidate: () => boolean,
+    options?: { instructions?: string },
+  ): Promise<IdleCompactionOutcome | null>;
 }
 
 interface Options {
@@ -107,6 +124,13 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+function normalizeInstructions(value: unknown): string | undefined {
+  if (typeof value !== "string" || !IDLE_COMPACTION_INSTRUCTIONS_PATTERN.test(value)) {
+    return undefined;
+  }
+  return value.trim();
+}
+
 function defaultMaxIdleMinutes(idleMinutes: number): number {
   return idleMinutes + Math.max(1, Math.ceil(idleMinutes / 9));
 }
@@ -126,6 +150,8 @@ function normalizeProviderOverrides(
     if (maxIdleMinutes !== undefined) entry.maxIdleMinutes = maxIdleMinutes;
     const minContextTokens = positiveInteger(override.minContextTokens);
     if (minContextTokens !== undefined) entry.minContextTokens = minContextTokens;
+    const instructions = normalizeInstructions(override.instructions);
+    if (instructions !== undefined) entry.instructions = instructions;
     if (Object.keys(entry).length > 0) {
       normalized[providerId] = entry;
     }
@@ -140,10 +166,13 @@ export function normalizeIdleCompactionSettings(
   const maxIdleMinutes = positiveFinite(input?.maxIdleMinutes);
   const minContextTokens =
     positiveInteger(input?.minContextTokens) ?? DEFAULT_IDLE_COMPACTION_SETTINGS.minContextTokens;
+  const instructions =
+    normalizeInstructions(input?.instructions) ?? DEFAULT_IDLE_COMPACTION_INSTRUCTIONS;
   const providers = normalizeProviderOverrides(input?.providers);
   return {
     enabled: input?.enabled ?? DEFAULT_IDLE_COMPACTION_SETTINGS.enabled,
     minContextTokens,
+    instructions,
     ...(idleMinutes !== undefined ? { idleMinutes } : {}),
     ...(maxIdleMinutes !== undefined ? { maxIdleMinutes } : {}),
     ...(providers !== undefined ? { providers } : {}),
@@ -159,6 +188,17 @@ function resolveMaxIdleMinutes(
   if (override?.maxIdleMinutes !== undefined) return override.maxIdleMinutes;
   if (override?.idleMinutes === undefined && builtin !== undefined) return builtin.maxIdleMinutes;
   return fallbackMax ?? defaultMaxIdleMinutes(idleMinutes);
+}
+
+function resolveInstructions(
+  override: IdleCompactionProviderSettings | undefined,
+  settings: IdleCompactionSettings,
+): string | undefined {
+  const raw =
+    normalizeInstructions(override?.instructions) ??
+    normalizeInstructions(settings.instructions) ??
+    DEFAULT_IDLE_COMPACTION_INSTRUCTIONS;
+  return raw || undefined;
 }
 
 /**
@@ -185,10 +225,13 @@ export function resolveProviderIdleCompactionPolicy(
   );
   if (maxIdleMinutes <= idleMinutes) return null;
 
+  const instructions = resolveInstructions(override, settings);
+
   return {
     idleMinutes,
     maxIdleMinutes,
     minContextTokens: override?.minContextTokens ?? settings.minContextTokens,
+    ...(instructions !== undefined ? { instructions } : {}),
   };
 }
 
@@ -324,6 +367,7 @@ export function createIdleCompaction(options: Options) {
     runtime: IdleCompactionCandidate,
     policy: ResolvedProviderIdleCompactionPolicy,
     idleSince: number,
+    usedInstructions: boolean,
     isWithinCacheWindow: () => boolean,
     isCurrent: () => boolean,
     outcome: IdleCompactionOutcome | null,
@@ -341,6 +385,7 @@ export function createIdleCompaction(options: Options) {
           cacheAgeMs: now() - runtime.lastActivityAt,
           idleThresholdMinutes: policy.idleMinutes,
           maxIdleMinutes: policy.maxIdleMinutes,
+          usedInstructions,
           contextTokensBefore: outcome.contextTokensBefore,
           contextTokensAfter: outcome.contextTokensAfter,
           contextWindowMaxTokens: outcome.contextWindowMaxTokens,
@@ -408,11 +453,17 @@ export function createIdleCompaction(options: Options) {
       const revalidate = () =>
         isCurrent() && isWithinCacheWindow() && baselineAllows(runtime, options.runtimes());
 
-      const outcome = await runtime.compactIfEligible(revalidate);
+      const instructions =
+        runtime.supportsCompactionInstructions === true ? policy.instructions : undefined;
+      const outcome = await runtime.compactIfEligible(
+        revalidate,
+        instructions !== undefined ? { instructions } : undefined,
+      );
       settleCompactionResult(
         runtime,
         policy,
         idleSince,
+        instructions !== undefined,
         isWithinCacheWindow,
         isCurrent,
         outcome,

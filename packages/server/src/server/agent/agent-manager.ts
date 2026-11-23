@@ -2360,11 +2360,17 @@ export class AgentManager {
         isEligible,
         hasLiveDescendant: () => this.findLiveDescendantBlockerSync(agent) !== null,
         supportsCompaction: agent.session.supportsCompaction?.bind(agent.session),
+        supportsCompactionInstructions: agent.session.supportsCompactionInstructions === true,
         canStopRuntime: agent.session.canStopRuntime?.bind(agent.session),
-        compactIfEligible: async (revalidate) => {
+        compactIfEligible: async (revalidate, options) => {
           try {
+            const instructions =
+              agent.session.supportsCompactionInstructions === true
+                ? options?.instructions
+                : undefined;
             const result = await this.compactAgent(agent.id, {
               trigger: "auto",
+              ...(instructions !== undefined ? { instructions } : {}),
               admit: () => isEligible() && revalidate(),
             });
             if (this.agents.get(agent.id) === agent) {
