@@ -12,7 +12,7 @@ import {
 import type { DaemonTransportFactory } from "@getpaseo/client/internal/daemon-client-transport-types";
 import type { HostDirectory } from "@getpaseo/protocol/hosts";
 import { OWNER_PERMISSIONS } from "../../authorization/index.js";
-import type { ConnectedHosts } from "../../connected-hosts/index.js";
+import type { ConnectedHosts, HostWakeIntent } from "../../connected-hosts/index.js";
 import { resolveRequiredProviderModel } from "../mcp-shared.js";
 import { selectAgentListItems } from "../agent-projections.js";
 import { summarizeAgentActivity } from "../activity-curator.js";
@@ -74,6 +74,8 @@ export interface HostObservation {
 }
 export interface ToolHosts {
   directory(): Promise<HostDirectory>;
+  /** Before an operation that carries work: wakes a sleeping host, or rejects as not sent. */
+  wake(serverId: string, intent: HostWakeIntent): Promise<void>;
   use<T>(
     serverId: string,
     action: (client: DaemonClient) => Promise<T>,
@@ -85,6 +87,12 @@ export interface ToolHosts {
 export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
   return {
     directory: () => hosts.list(),
+    async wake(serverId, intent) {
+      // Before the route client exists, so its connect timeout doesn't run during the wake.
+      await hosts.awaitOnline(serverId, intent).catch((error: unknown) => {
+        throw new HostOperationRejectedError(error);
+      });
+    },
     async use(serverId, action, signal) {
       const lifetime = new AbortController();
       let routeFailure: unknown;
@@ -212,11 +220,13 @@ export function createHostResolver(input: {
     async use<T>(
       serverId: string | undefined,
       action: (host: HostOperations) => Promise<T>,
+      wake?: HostWakeIntent,
     ): Promise<T> {
       const destination = serverId ?? input.serverId;
       if (destination === input.serverId) return action(input.local);
       if (input.lockedCwd)
         throw new Error("This caller is restricted to its local working directory");
+      if (wake) await input.hosts().wake(destination, wake);
       return input.hosts().use(destination, async (client) =>
         action({
           async createAgent(args) {

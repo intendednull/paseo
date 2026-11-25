@@ -127,6 +127,7 @@ function resolverFor(client: DaemonClient, caller: Caller | null) {
     local: {} as HostOperations,
     hosts: () => ({
       directory: async () => ({ self: { serverId: "origin", label: "Origin" }, hosts: [] }),
+      wake: async () => {},
       use: (_serverId, action) => action(client),
     }),
   });

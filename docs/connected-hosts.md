@@ -79,6 +79,15 @@ with capped backoff, so it comes online once updated. Self, duplicate, changed-i
 authentication failures stay in `error` until an update changes the connection, `enabled`, or
 `replaceIdentity`, or A restarts.
 
+A route to an offline host fails at once with `host_offline`, unless a plugin registered
+`host.route.offline` and the route carries work: daemon-MCP `create_agent`, `create_workspace` and
+`send_agent_prompt`, or a session route opened with `wake: true` (the app sets it only when it sends a
+message to a routed host that is offline). The registry then offers the host to the plugin, resets
+its link so the backoff doesn't delay the reconnect, and waits up to
+`daemon.connectedHosts.wakeTimeoutSeconds` (default 90) for it to come online. One wake runs per host
+at a time. Status reads never wake a host, so a polling client doesn't keep one awake. See the
+[hook](../public-docs/plugins/hooks.md#hostrouteoffline).
+
 Disposing a routed API releases its observations and session. It does not remove the saved host or
 affect sibling API scopes. Disposing the origin cascades to its derived scopes. Observations restore
 through the usual owned-subscription contract. The ordinary client queues new requests while connecting

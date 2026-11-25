@@ -103,6 +103,18 @@
           },
           "additionalProperties": false
         },
+        "connectedHosts": {
+          "type": "object",
+          "properties": {
+            "wakeTimeoutSeconds": {
+              "description": "How long a route that carries work waits for a plugin to wake a sleeping connected host. Defaults to 90.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600
+            }
+          },
+          "additionalProperties": false
+        },
         "autoArchiveAfterMerge": {
           "type": "boolean"
         },
@@ -527,6 +539,69 @@
         },
         "idleRuntimeCleanup": {
           "type": "boolean"
+        },
+        "idleCompaction": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "idleMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1440
+            },
+            "maxIdleMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1440
+            },
+            "minContextTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "instructions": {
+              "type": "string",
+              "pattern": "^(?!.*<\\/?(?:[cC][oO][mM][mM][aA][nN][dD]-(?:[aA][rR][gG][sS]|[nN][aA][mM][eE]|[mM][eE][sS][sS][aA][gG][eE])|[lL][oO][cC][aA][lL]-[cC][oO][mM][mM][aA][nN][dD]-(?:[sS][tT][dD][oO][uU][tT]|[sS][tT][dD][eE][rR][rR]|[cC][aA][vV][eE][aA][tT])|[tT][aA][sS][kK]-[nN][oO][tT][iI][fF][iI][cC][aA][tT][iI][oO][nN])\\b)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$"
+            },
+            "providers": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "idleMinutes": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 1440
+                  },
+                  "maxIdleMinutes": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 1440
+                  },
+                  "minContextTokens": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "pattern": "^(?!.*<\\/?(?:[cC][oO][mM][mM][aA][nN][dD]-(?:[aA][rR][gG][sS]|[nN][aA][mM][eE]|[mM][eE][sS][sS][aA][gG][eE])|[lL][oO][cC][aA][lL]-[cC][oO][mM][mM][aA][nN][dD]-(?:[sS][tT][dD][oO][uU][tT]|[sS][tT][dD][eE][rR][rR]|[cC][aA][vV][eE][aA][tT])|[tT][aA][sS][kK]-[nN][oO][tT][iI][fF][iI][cC][aA][tT][iI][oO][nN])\\b)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "resumeOnStartup": {
           "type": "boolean"

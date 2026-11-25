@@ -62,6 +62,8 @@ export const HostsRouteOpenRequestSchema = z.object({
   requestId: z.string(),
   serverId: z.string(),
   scopeId: z.string().min(1).max(256),
+  /** Ask the daemon to wake a sleeping host first. Older daemons ignore it and fail at once. */
+  wake: z.boolean().optional(),
 });
 export const HostsRouteFrameRequestSchema = z.object({
   type: z.literal("hosts.route.frame.request"),

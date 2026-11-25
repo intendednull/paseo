@@ -95,6 +95,17 @@ describe("server config", () => {
     expect(config.providerCatalogRefreshTimeoutMs).toBe(180_000);
   });
 
+  test("loads the connected-host wake timeout, unset by default", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-host-wake-"));
+    roots.push(paseoHome);
+    expect(loadConfig(paseoHome, { env: {} }).hostWakeTimeoutMs).toBeUndefined();
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ daemon: { connectedHosts: { wakeTimeoutSeconds: 120 } } }),
+    );
+    expect(loadConfig(paseoHome, { env: {} }).hostWakeTimeoutMs).toBe(120_000);
+  });
+
   test("resolves reload state from the supplied validated snapshot", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-snapshot-"));
     roots.push(paseoHome);

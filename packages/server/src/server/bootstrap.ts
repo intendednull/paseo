@@ -443,6 +443,8 @@ export interface PaseoDaemonConfig {
     maxProcessConcurrency: number;
   };
   autoArchiveAfterMerge?: boolean;
+  /** How long a route that carries work waits for a plugin to wake a sleeping host. */
+  hostWakeTimeoutMs?: number;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
   terminalProfiles?: TerminalProfile[];
@@ -1975,6 +1977,10 @@ export async function createPaseoDaemon(
               orchestrationSkills,
               workspaceLabelService,
               workspaceArchiveOperations,
+            );
+            wsServer.setHostWakeHandler(
+              (event, options) => pluginRuntime.hostRouteOffline(event, options),
+              config.hostWakeTimeoutMs,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();

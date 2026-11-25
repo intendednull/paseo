@@ -198,6 +198,7 @@ test.each([
       error: null,
     };
     const hosts: ToolHosts = {
+      wake: async () => {},
       directory: async () => ({
         self: { serverId: "origin", label: "Origin" },
         hosts: status === "removed" ? [] : [row],

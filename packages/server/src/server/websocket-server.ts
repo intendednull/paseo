@@ -14,7 +14,7 @@ import {
 import { createToolHosts } from "./agent/host-operations/index.js";
 import { HOST_ROUTE_OPCODE } from "@getpaseo/protocol/binary-frames/index";
 import { DaemonLinkEndpoint, VirtualHostSocket } from "./connected-hosts/index.js";
-import { ConnectedHosts } from "./connected-hosts/index.js";
+import { ConnectedHosts, type HostWakeHandler } from "./connected-hosts/index.js";
 import { stat } from "node:fs/promises";
 import {
   createWorkspaceBaseBranchService,
@@ -601,6 +601,10 @@ export class VoiceAssistantWebSocketServer {
 
   toolHosts() {
     return createToolHosts(this.connectedHosts);
+  }
+  /** Lets plugins wake a sleeping connected host before a route that carries work. */
+  setHostWakeHandler(handler: HostWakeHandler, timeoutMs?: number): void {
+    this.connectedHosts.setWakeHandler(handler, timeoutMs);
   }
   private readonly passwordHash: string | undefined;
   private readonly credentialSource: DaemonAuthConfig | undefined;

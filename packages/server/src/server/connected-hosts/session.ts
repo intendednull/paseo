@@ -209,6 +209,9 @@ export class ConnectedHostSession {
         originSessionId: this.originSessionId,
         permissions: this.permissions(),
         signal: owner.signal,
+        ...(message.wake === true
+          ? { wake: { operation: "session_route" as const, caller: null } }
+          : {}),
         frame: async (data) => {
           const output: SessionOutboundMessage | null =
             typeof data === "string"

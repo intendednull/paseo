@@ -1345,6 +1345,8 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
   return error instanceof Error ? error : new Error(String(error));
 }
 
+// The daemon's wake wait is at most 600 s; the margin covers the route handshake after it.
+const HOST_WAKE_ROUTE_TIMEOUT_MS = 630_000;
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
@@ -2123,13 +2125,27 @@ export class DaemonClient {
       responseType: "hosts.remove.response",
     });
   }
-  async openHostRoute(serverId: string, scopeId: string): Promise<string> {
+  /**
+   * `wake` asks the daemon to wake a sleeping host first (a plugin does the waking); set it only for
+   * a route that carries work, never for a status poll. The daemon bounds the wait (600 s at most).
+   */
+  async openHostRoute(
+    serverId: string,
+    scopeId: string,
+    options?: { wake?: boolean },
+  ): Promise<string> {
     this.requireConnectedHosts();
     try {
       return (
         await this.sendCorrelatedSessionRequest({
-          message: { type: "hosts.route.open.request", serverId, scopeId },
+          message: {
+            type: "hosts.route.open.request",
+            serverId,
+            scopeId,
+            ...(options?.wake ? { wake: true } : {}),
+          },
           responseType: "hosts.route.open.response",
+          ...(options?.wake ? { timeout: HOST_WAKE_ROUTE_TIMEOUT_MS } : {}),
         })
       ).routeId;
     } catch (error) {

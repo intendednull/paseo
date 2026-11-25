@@ -547,6 +547,11 @@ function resolveProfileLists(persisted: ReturnType<typeof loadPersistedConfig>) 
   };
 }
 
+function resolveHostWakeTimeout(persisted: ReturnType<typeof loadPersistedConfig>) {
+  const seconds = persisted.daemon?.connectedHosts?.wakeTimeoutSeconds;
+  return seconds === undefined ? {} : { hostWakeTimeoutMs: seconds * 1000 };
+}
+
 function resolveStaticLoadConfigSettings(
   env: NodeJS.ProcessEnv,
   cli: CliConfigOverrides | undefined,
@@ -559,6 +564,7 @@ function resolveStaticLoadConfigSettings(
     usageEnabled: resolveUsageEnabled(persisted),
     browserToolsEnabled: resolveBrowserToolsEnabled(persisted),
     autoArchiveAfterMerge: persisted.daemon?.autoArchiveAfterMerge ?? false,
+    ...resolveHostWakeTimeout(persisted),
     appendSystemPrompt: resolveAppendSystemPrompt(persisted),
     ...resolveProfileLists(persisted),
     hostnames: mergeHostnames([

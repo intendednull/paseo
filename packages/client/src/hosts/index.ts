@@ -12,7 +12,8 @@ export interface PaseoHostActions {
   add(input: HostAdd): Promise<HostSummary>;
   update(registrationId: string, patch: HostUpdate): Promise<HostSummary>;
   remove(registrationId: string): Promise<void>;
-  client(serverId: string): Promise<PaseoApi>;
+  /** `wake: true` wakes a sleeping host first; use it only to carry work, never to poll. */
+  client(serverId: string, options?: { wake?: boolean }): Promise<PaseoApi>;
 }
 
 export function createHostChannelTransport(
@@ -179,7 +180,7 @@ export function createHostActions(
       assertActive();
       return origin.removeHost(id);
     },
-    async client(serverId) {
+    async client(serverId, options) {
       assertActive();
       origin.requireConnectedHosts();
       if (origin.getLastServerInfoMessage()?.serverId === serverId) {
@@ -192,7 +193,11 @@ export function createHostActions(
       owner.signal.addEventListener("abort", cancel, { once: true });
       let routeId: string;
       try {
-        routeId = await origin.openHostRoute(serverId, scopeId);
+        routeId = await origin.openHostRoute(
+          serverId,
+          scopeId,
+          options?.wake ? { wake: true } : undefined,
+        );
       } catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
           serverId,

@@ -50,6 +50,35 @@ interface Route {
   close(code?: string, message?: string): void;
 }
 
+/** Operations that carry work to a host. Status reads and listings never wake one. */
+export type HostWakeOperation =
+  | "create_agent"
+  | "create_workspace"
+  | "send_agent_prompt"
+  | "session_route";
+export interface HostWakeIntent {
+  operation: HostWakeOperation;
+  caller: { agentId: string; labels: Record<string, string> } | null;
+}
+export interface HostWakeEvent extends HostWakeIntent {
+  host: {
+    registrationId: string;
+    serverId: string;
+    label: string | null;
+    metadata: Record<string, string>;
+    status: "connecting" | "offline";
+    error: { code: string; message: string } | null;
+    lastOnlineAt: string | null;
+  };
+  deadline: string;
+}
+/** Wakes a sleeping host, or answers "skipped" when it doesn't manage it. */
+export type HostWakeHandler = (
+  event: HostWakeEvent,
+  options: { signal: AbortSignal; timeoutMs: number },
+) => Promise<"woken" | "skipped">;
+export const DEFAULT_HOST_WAKE_TIMEOUT_MS = 90_000;
+
 /** Daemon-owned configuration, identity pinning, retry and routed session lifetime. */
 export class ConnectedHosts {
   private readonly budget = new HostTransportBudget();
@@ -60,6 +89,9 @@ export class ConnectedHosts {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly ready: Promise<void>;
   private closed = false;
+  private wakeHandler: HostWakeHandler | null = null;
+  private wakeTimeoutMs = DEFAULT_HOST_WAKE_TIMEOUT_MS;
+  private readonly wakes = new Map<string, { done: Promise<void>; abort(): void }>();
   constructor(
     private readonly home: string,
     private readonly self: HostDirectory["self"],
@@ -377,6 +409,135 @@ export class ConnectedHosts {
     retry.unref();
     return retry;
   }
+  /** Without a handler a route to an offline host fails at once, as it always did. */
+  setWakeHandler(handler: HostWakeHandler | null, timeoutMs = DEFAULT_HOST_WAKE_TIMEOUT_MS): void {
+    this.wakeHandler = handler;
+    this.wakeTimeoutMs = timeoutMs;
+  }
+  /**
+   * Before a route that carries work, offers an offline host to the wake handler and waits, bounded,
+   * until its link is online again. It never chooses the route: the caller opens the route to its own
+   * serverId afterwards and the usual checks apply. Concurrent callers share one wake per host.
+   */
+  async awaitOnline(serverId: string, intent: HostWakeIntent, signal?: AbortSignal): Promise<void> {
+    await this.ready;
+    const handler = this.wakeHandler;
+    if (!handler || this.closed) return;
+    const row = this.rows.find((entry) => entry.serverId === serverId);
+    // A disabled host, or one with a terminal error, is not waited on.
+    if (!row?.serverId || !row.enabled || (row.status !== "offline" && row.status !== "connecting"))
+      return;
+    let wake = this.wakes.get(row.registrationId);
+    if (!wake) {
+      const controller = new AbortController();
+      const done = this.wake(row, row.serverId, intent, handler, controller.signal).finally(() =>
+        this.wakes.delete(row.registrationId),
+      );
+      wake = { done, abort: () => controller.abort() };
+      this.wakes.set(row.registrationId, wake);
+    }
+    if (!signal) return wake.done;
+    signal.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const abort = () =>
+        reject(new HostError("host_offline", "The caller stopped waiting for the host", serverId));
+      signal.addEventListener("abort", abort, { once: true });
+      wake.done.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+  private async wake(
+    row: Saved,
+    serverId: string,
+    intent: HostWakeIntent,
+    handler: HostWakeHandler,
+    stopped: AbortSignal,
+  ): Promise<void> {
+    const timeoutMs = this.wakeTimeoutMs;
+    const label = row.label ?? serverId;
+    const asleep = (reason: string) =>
+      new HostError(
+        "host_offline",
+        `Host ${label} is asleep; ${reason}; the message was not sent.`,
+        serverId,
+      );
+    const timedOut = () =>
+      asleep(`waking it timed out: not online within ${Math.round(timeoutMs / 1000)} s`);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), timeoutMs);
+    timer.unref();
+    const signal = AbortSignal.any([deadline.signal, stopped]);
+    try {
+      let outcome: "woken" | "skipped";
+      try {
+        outcome = await handler(
+          {
+            host: {
+              registrationId: row.registrationId,
+              serverId,
+              label: row.label,
+              metadata: { ...row.metadata },
+              status: row.status === "connecting" ? "connecting" : "offline",
+              error: row.error ? { ...row.error } : null,
+              lastOnlineAt: row.lastOnlineAt,
+            },
+            operation: intent.operation,
+            caller: intent.caller
+              ? { agentId: intent.caller.agentId, labels: { ...intent.caller.labels } }
+              : null,
+            deadline: new Date(Date.now() + timeoutMs).toISOString(),
+          },
+          { signal, timeoutMs },
+        );
+      } catch (error) {
+        if (deadline.signal.aborted) throw timedOut();
+        if (stopped.aborted) throw asleep("waking it failed: the daemon is stopping");
+        throw asleep(`waking it failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (outcome === "skipped") return;
+      await this.resetLink(row);
+      await this.untilOnline(row, signal).catch((error: unknown) => {
+        if (deadline.signal.aborted) throw timedOut();
+        throw asleep(`waking it failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  /** A fresh link with no backoff, so a woken host is reached at once. Not persisted. */
+  private resetLink(row: Saved): Promise<void> {
+    return this.mutate(async () => {
+      if (!this.rows.includes(row) || !row.enabled || row.status === "online") return;
+      if (row.status === "error") return;
+      this.stop(row.registrationId);
+      row.status = "connecting";
+      row.error = null;
+      row.nextRetryAt = null;
+      this.start(row);
+      this.changed();
+    });
+  }
+  private untilOnline(row: Saved, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        stop();
+        signal.removeEventListener("abort", aborted);
+        if (error) reject(error);
+        else resolve();
+      };
+      const check = () => {
+        if (!this.rows.includes(row)) finish(new Error("the host was removed"));
+        else if (!row.enabled) finish(new Error("the host was disabled"));
+        else if (row.status === "error")
+          finish(new Error(row.error?.message ?? "the host link failed"));
+        else if (row.status === "online" && this.live.get(row.registrationId)?.accepted) finish();
+      };
+      const aborted = () => finish(new Error("stopped waiting"));
+      const stop = this.observe(check);
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) aborted();
+      else check();
+    });
+  }
   async openRoute(input: {
     serverId: string;
     scopeId: string;
@@ -384,10 +545,13 @@ export class ConnectedHosts {
     originSessionId: string;
     permissions: readonly DaemonPermission[];
     signal: AbortSignal;
+    /** Wake a sleeping host first (see awaitOnline); omitted, an offline host fails at once. */
+    wake?: HostWakeIntent;
     frame(data: string | Uint8Array): void | Promise<void>;
     ended(code: string, message: string): void;
   }): Promise<{ send(data: string | Uint8Array): void; close(): void }> {
     await this.ready;
+    if (input.wake) await this.awaitOnline(input.serverId, input.wake, input.signal);
     const row = this.rows.find((entry) => entry.serverId === input.serverId);
     if (!row) throw new HostError("host_unknown", `Unknown host ${input.serverId}`, input.serverId);
     if (!row.enabled)
@@ -549,6 +713,7 @@ export class ConnectedHosts {
   }
   async close(): Promise<void> {
     this.closed = true;
+    for (const wake of this.wakes.values()) wake.abort();
     await this.ready;
     await this.queue;
     for (const id of this.live.keys()) this.stop(id);

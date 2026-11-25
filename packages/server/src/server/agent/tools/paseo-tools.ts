@@ -10,6 +10,7 @@ import {
   type HostOperations,
   type ToolHosts,
 } from "../host-operations/index.js";
+import type { HostWakeIntent } from "../../connected-hosts/index.js";
 import { AgentDirectory } from "../directory.js";
 import { stat } from "node:fs/promises";
 import { z } from "zod";
@@ -734,6 +735,19 @@ function createToolCatalog(
     ["get_agent_activity", "getActivity"],
     ["list_agents", "listAgents"],
   ] as const satisfies ReadonlyArray<readonly [string, keyof HostOperations]>);
+  // Only operations that carry work wake a sleeping host; status reads and listings fail at once.
+  const hostWakeOperations = new Set<string>([
+    "create_agent",
+    "create_workspace",
+    "send_agent_prompt",
+  ]);
+  function hostWakeIntent(name: string): HostWakeIntent {
+    const caller = callerAgentId ? agentManager.getAgent(callerAgentId) : null;
+    return {
+      operation: name as HostWakeIntent["operation"],
+      caller: caller ? { agentId: caller.id, labels: { ...caller.labels } } : null,
+    };
+  }
   const hostResolver = createHostResolver({
     serverId: options.serverId ?? "self",
     callerAgentId,
@@ -786,8 +800,10 @@ function createToolCatalog(
         const destination = serverId ?? options.serverId;
         const remoteNotification = await prepareRemoteNotification(name, destination, input);
         try {
-          const response = await hostResolver.use(serverId, (host) =>
-            host[operation](input, context),
+          const response = await hostResolver.use(
+            serverId,
+            (host) => host[operation](input, context),
+            hostWakeOperations.has(name) ? hostWakeIntent(name) : undefined,
           );
           if (response.isError) await remoteNotification?.reject();
           else remoteNotification?.accept();

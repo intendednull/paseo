@@ -52,6 +52,7 @@ interface TestPaseoDaemonOptions {
   trustedProxies?: PaseoDaemonConfig["trustedProxies"];
   agentProfiles?: AgentProfile[];
   autoArchiveAfterMerge?: boolean;
+  hostWakeTimeoutMs?: number;
   resumeOnStartup?: boolean;
   resumePrompt?: string;
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
@@ -231,6 +232,7 @@ async function prepareTestDaemonConfig(
     downloadTokenTtlMs: options.downloadTokenTtlMs,
     agentProfiles: options.agentProfiles,
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
+    hostWakeTimeoutMs: options.hostWakeTimeoutMs,
     resumeOnStartup: options.resumeOnStartup,
     resumePrompt: options.resumePrompt,
     pluginsEnabled: options.pluginsEnabled,

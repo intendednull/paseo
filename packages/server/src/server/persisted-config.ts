@@ -332,6 +332,20 @@ export const PersistedConfigSchema = z
           })
           .strict()
           .optional(),
+        connectedHosts: z
+          .object({
+            wakeTimeoutSeconds: z
+              .number()
+              .int()
+              .min(1)
+              .max(600)
+              .optional()
+              .describe(
+                "How long a route that carries work waits for a plugin to wake a sleeping connected host. Defaults to 90.",
+              ),
+          })
+          .strict()
+          .optional(),
         autoArchiveAfterMerge: z.boolean().optional(),
         enableTerminalAgentHooks: z.boolean().optional(),
         appendSystemPrompt: z.string().optional(),
