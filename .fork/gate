@@ -6,7 +6,8 @@
 # package generates its validators in prebuild), so they are re-enabled here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec nix shell --inputs-from ~/nixos nixpkgs#nodejs_22 -c bash -euo pipefail -c '
+# The fork's own flake supplies nodejs_22, so the gate runs the same on every machine.
+exec nix develop "$PWD" -c bash -euo pipefail -c '
 export PATH=$PWD/node_modules/.bin:$PATH npm_config_ignore_scripts=false
 base=$(cat .fork/base)
 git merge-base --is-ancestor "$base" HEAD || { echo "gate: HEAD is not on $base (.fork/base)" >&2; exit 1; }

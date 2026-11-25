@@ -1,15 +1,16 @@
 # intendednull/paseo — downstream source fork of getpaseo/paseo
 
-The operator's NixOS flake (~/nixos, private) builds this fork from source with upstream's own Nix files
-(`nix/package.nix` for the daemon/CLI, `nix/desktop-package.nix` for the Electron
-app), called with ~/nixos's nixpkgs. Runbook: docs/forks.md in ~/nixos ("Paseo").
+The operator's NixOS flakes (private, one per machine) build this fork from source with
+upstream's own Nix files (`nix/package.nix` for the daemon/CLI, `nix/desktop-package.nix`
+for the Electron app), called with each flake's own nixpkgs. Every machine pins the same
+`sync/<tag>` branch, so nothing machine-specific belongs in this fork.
 
 Two commits fix upstream's Nix packaging itself (patch-package never ran; the
 unpackaged Electron fetched React DevTools).
 
 ## Why this fork exists
 
-~/nixos carried these changes as diffs against the shipped release's dist JS
+The operator's flake carried these changes as diffs against the shipped release's dist JS
 (forks/paseo/patches, asar patching). Keeping them as TypeScript commits here
 makes them readable, testable with upstream's suite, and rebasable.
 
@@ -26,7 +27,7 @@ Contributions upstream are OFF unless the operator asks, for that change only.
 
 ## Queue
 
-`git log --reverse $(cat .fork/base)..nixos` — `.fork/base` names the upstream tag the
+`git log --reverse $(cat .fork/base)..sync/<tag>` — `.fork/base` names the upstream tag the
 queue sits on. Every commit carries `Upstream-Status:`
 (backport | submitted | closed (<reason>) | unsent | local) and `Drop-When:`.
 
@@ -57,8 +58,10 @@ The commit trailers are authoritative; this is the summary.
 
 ## Branches
 
-- `nixos`: base tag plus the patch queue; what the flake builds.
-- `patch/<slug>`: one change, cut from `nixos`.
+- `sync/<tag>`: upstream `<tag>` plus the patch queue; what the flakes pin. A new
+  upstream tag gets a new `sync/<tag>` branch; existing ones are never rewritten.
+- `nixos`: the queue on v0.17.0-beta.1, from before `sync/*`. Kept as history.
+- `patch/<slug>`: one change, cut from the current `sync/<tag>`.
 - `pin/<date>-<short8>` tags: every pinned rev. Never moved or deleted.
 
 ## Remotes
@@ -69,15 +72,15 @@ only `git push`. `gh repo set-default intendednull/paseo` keeps `gh` off the ups
 ## Updating to a new upstream tag
 
 Upstream tags each sit on their own release branch: the old tag is usually not an
-ancestor of the new one. Replaying `<old-tag>..nixos` still works.
+ancestor of the new one. Replaying `<old-tag>..sync/<old-tag>` still works.
 
 1. `git fetch upstream --tags`. This clone is `blob:none`: check the new tag out in a
    scratch worktree (`git worktree add --detach /tmp/paseo-<tag> <tag>`) before grepping
    it, or `git grep <tag>` fetches blobs one at a time.
 2. Check every commit's `Drop-When:` against the release notes and the new tag's source.
-3. In that worktree, `git switch -c bump/<tag>` and cherry-pick the kept commits
-   (`git log --reverse --format=%h $(cat .fork/base)..nixos`). `nixos` stays on the
-   current pin until the gate passes.
+3. In that worktree, `git switch -c sync/<tag>` and cherry-pick the kept commits
+   (`git log --reverse --format=%h $(cat .fork/base)..sync/<old-tag>`). Nothing pins
+   the new branch until the gate passes.
 4. Write the tag into `.fork/base`, drop the dropped commits' paths from `.fork/gate`,
    and update the table above.
 5. `npm ci --ignore-scripts`, `node scripts/postinstall-patches.mjs`, then `.fork/gate`.
@@ -88,7 +91,6 @@ ancestor of the new one. Replaying `<old-tag>..nixos` still works.
    `package-lock.json`. If the hash is older, or the queue changes the lock, refresh
    it (the npm-deps FOD's "got" hash, or `scripts/update-nix.sh`) in a
    `fix(nix): refresh npm-deps.hash` commit.
-7. Move `nixos` to the branch, tag `pin/<date>-<short8>`, push `nixos` with
-   `--force-with-lease=nixos:<old pin sha>` and the tag.
-8. In a ~/nixos worktree: set the `paseo-src` rev, `nix flake lock --update-input paseo-src`,
-   then `nix build .#paseo-src .#paseo-src-desktop` and the forks/paseo/test checks.
+7. Push `sync/<tag>` as a new branch (no force-push; older `sync/*` and `nixos` stay put).
+8. In each machine's flake: pin `paseo-src` to the branch head rev, `nix flake lock
+--update-input paseo-src`, then build the daemon and desktop packages.
