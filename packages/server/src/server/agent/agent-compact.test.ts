@@ -1033,7 +1033,7 @@ describe("AgentManager.compactAgent", () => {
       const queuedDelivery = delivery.enqueue({
         recipientId: target.id,
         prompt: "Follow up on root",
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
 
       // Fire quiet-window timer while compaction holds the run slot:
@@ -1882,7 +1882,7 @@ describe("CodexAppServerAgentSession compaction", () => {
       const queuedMsg = delivery.enqueue({
         recipientId: h2.agent.id,
         prompt: "Child report during slow Codex compaction",
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
       for (const t of timers.splice(0)) if (!t.canceled) t.fn();
       await vi.waitFor(() => expect(busyErrors).toHaveLength(1));
@@ -2116,7 +2116,7 @@ describe("CodexAppServerAgentSession compaction", () => {
       const queuedMsg = delivery.enqueue({
         recipientId: agent.id,
         prompt: "Child report during desynced compaction",
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
       for (const t of timers.splice(0)) if (!t.canceled) t.fn();
       await vi.waitFor(() => expect(busyErrors).toHaveLength(1));
@@ -2446,7 +2446,7 @@ describe("OpenCodeV2Session compaction", () => {
       const queued2 = delivery2.enqueue({
         recipientId: h2.agent.id,
         prompt: "Child report during slow OpenCode compaction",
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
       for (const t of timers2.splice(0)) if (!t.canceled) t.fn();
       await vi.waitFor(() => expect(busyErrors2).toHaveLength(1));
@@ -2533,7 +2533,7 @@ describe("OpenCodeV2Session compaction", () => {
       delivery3.enqueue({
         recipientId: h3.agent.id,
         prompt: "Report during quarantine",
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
       for (const t of timers3.splice(0)) if (!t.canceled) t.fn();
       await vi.waitFor(() => expect(busyErrors3).toHaveLength(1));
@@ -2944,7 +2944,7 @@ describe("Manual compaction with live child sessions", () => {
       const reportDelivery = delivery.enqueue({
         recipientId: lead.id,
         prompt: childReportPrompt,
-        activeTurnBehavior: "steer",
+        activeTurnBehavior: "queue",
       });
 
       // Fire quiet-window timer while compaction holds the foreground run slot.
