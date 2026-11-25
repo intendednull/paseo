@@ -362,3 +362,72 @@ test("a session route asks for a wake explicitly; a plain route still fails at o
   expect(endpoint.events).toMatchObject([{ operation: "session_route", caller: null }]);
   expect((await remote.agents.ref(agentId).refresh())?.agent.title).toBe("Sleepy child");
 }, 90_000);
+
+test("a hanging or throwing hook delays or fails only its own host's route", async () => {
+  const hanging = await sleepyHost();
+  const throwing = await sleepyHost();
+  const awake = await sleepyHost();
+  const a = await createTestPaseoDaemon({ hostWakeTimeoutMs: 6000 });
+  cleanup.push(() => a.close());
+  const { paseo, client } = await api(a);
+  const endpoint = await wakeEndpoint();
+  await installWakePlugin(client, join(a.staticDir, "wake-plugin"), endpoint.url);
+  const hosts = { hanging, throwing, awake };
+  for (const [label, host] of Object.entries(hosts))
+    await paseo.hosts.add({ connection: `127.0.0.1:${host.port}`, label });
+  await expect
+    .poll(async () => (await paseo.hosts.list()).hosts.map((host) => host.status), {
+      timeout: 15000,
+    })
+    .toEqual(["online", "online", "online"]);
+  const serverIds = Object.fromEntries(
+    (await paseo.hosts.list()).hosts.map((host) => [host.label!, host.serverId!]),
+  );
+  const mcp = new Client({ name: "wake-isolation", version: "1" });
+  cleanup.push(() => mcp.close());
+  await mcp.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${a.port}/mcp/agents`)),
+  );
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const response = await mcp.callTool({ name, arguments: args });
+    return {
+      isError: response.isError === true,
+      body: z.record(z.string(), z.unknown()).parse(response.structuredContent),
+    };
+  };
+  const workspace = async (label: keyof typeof hosts) =>
+    call("create_workspace", {
+      serverId: serverIds[label],
+      isolation: "local",
+      path: hosts[label].staticDir,
+      title: `${label} workspace`,
+    });
+  await hanging.sleep();
+  await throwing.sleep();
+  await expect
+    .poll(async () => (await paseo.hosts.list()).hosts.map((host) => host.status), {
+      timeout: 15000,
+    })
+    .toEqual(["offline", "offline", "online"]);
+  endpoint.handle(async (event) =>
+    event.host.label === "hanging" ? "hang" : { error: "wake: no such sprite" },
+  );
+  const started = Date.now();
+  const stuck = workspace("hanging");
+  await expect.poll(() => endpoint.events.length).toBe(1);
+  // While one host's hook hangs, an online host and another offline host are unaffected.
+  const online = await workspace("awake");
+  expect(online, JSON.stringify(online.body)).toMatchObject({ isError: false });
+  const failed = await workspace("throwing");
+  expect(failed.body).toMatchObject({
+    code: "host_offline",
+    error: expect.stringContaining("Host throwing is asleep; waking it failed:"),
+  });
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(endpoint.events.map((event) => event.host.label)).toEqual(["hanging", "throwing"]);
+  expect((await stuck).body).toMatchObject({
+    code: "host_offline",
+    error: expect.stringContaining("Host hanging is asleep; waking it timed out"),
+  });
+  expect((await workspace("awake")).isError).toBe(false);
+}, 90_000);
