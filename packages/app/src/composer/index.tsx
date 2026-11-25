@@ -1706,11 +1706,13 @@ function ComposerContentImpl({
       sendAttachments: ComposerAttachment[],
       activeTurnBehavior: "interrupt" | "steer",
     ) => {
-      if (!client) {
+      // A routed host may be asleep: its origin wakes it before the message goes out.
+      const target = client?.isConnected ? client : await getHostRuntimeStore().wakeHost(serverId);
+      if (!target) {
         throw new Error(t("workspace.terminal.hostDisconnected"));
       }
       await dispatchComposerAgentMessage({
-        client,
+        client: target,
         agentId: targetAgentId,
         text,
         attachments: sendAttachments,

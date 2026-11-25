@@ -226,7 +226,11 @@ export interface HostRuntimeControllerDeps {
     host: HostProfile;
     connection: HostConnection;
   }) => () => void;
+  /** Asks the origin daemon to wake a sleeping routed host; rejects when it can't. */
+  wakeVia?: (input: { originServerId: string; serverId: string }) => Promise<void>;
 }
+
+const HOST_WAKE_RECONNECT_TIMEOUT_MS = 30_000;
 
 export interface HostRuntimeStorage {
   getItem: (key: string) => Promise<string | null>;
@@ -691,6 +695,13 @@ function createDefaultDeps(
         createPluginClientBundleStore: createHostPluginClientBundleStore,
       });
     },
+    wakeVia: async ({ originServerId, serverId }) => {
+      const origin = resolveOrigin(originServerId);
+      if (!origin?.isConnected) throw new Error(`Origin host ${originServerId} is unavailable`);
+      // The route itself is not used: opening it with wake makes the origin wake the host.
+      const routeId = await origin.openHostRoute(serverId, crypto.randomUUID(), { wake: true });
+      origin.closeHostRoute(routeId);
+    },
     getClientId: () => getOrCreateClientId(),
     mountClientHandlers: ({ client, host }) => {
       const unmountServerData = mountServerDataPushRouter({
@@ -879,6 +890,32 @@ export class HostRuntimeController {
       this.resetInactiveOnlineProbeBackoff();
     }
     this.activeClient?.ensureConnected(options);
+  }
+
+  /**
+   * Before work is sent to a routed host that is offline: asks its origin to wake it, reconnects
+   * through that origin and waits, bounded, for the host to come online. Never used for polling.
+   */
+  async wake(): Promise<void> {
+    if (isHostRuntimeConnected(this.snapshot)) return;
+    const route = this.host.connections.find(
+      (connection): connection is Extract<HostConnection, { type: "routed" }> =>
+        connection.type === "routed" && !this.authRejectedConnectionIds.has(connection.id),
+    );
+    if (!route || !this.deps.wakeVia) return;
+    await this.deps.wakeVia({ originServerId: route.originServerId, serverId: this.host.serverId });
+    await this.reconnectVia(route.originServerId);
+    if (isHostRuntimeConnected(this.snapshot)) return;
+    let unsubscribe = () => {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, HOST_WAKE_RECONNECT_TIMEOUT_MS);
+      unsubscribe = this.subscribe(() => {
+        if (isHostRuntimeConnected(this.snapshot)) resolve();
+      });
+    });
+    clearTimeout(timer);
+    unsubscribe();
   }
 
   async reconnectVia(originServerId: string): Promise<void> {
@@ -2927,6 +2964,12 @@ export class HostRuntimeStore {
 
   getClient(serverId: string): DaemonClient | null {
     return this.controllers.get(serverId)?.getClient() ?? null;
+  }
+
+  /** Wakes a sleeping routed host before work is sent to it; returns its client afterwards. */
+  async wakeHost(serverId: string): Promise<DaemonClient | null> {
+    await this.controllers.get(serverId)?.wake();
+    return this.getClient(serverId);
   }
 
   subscribe(serverId: string, listener: () => void): () => void {

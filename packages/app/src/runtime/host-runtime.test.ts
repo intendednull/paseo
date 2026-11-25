@@ -2573,6 +2573,72 @@ describe("HostRuntimeController", () => {
     });
   });
 
+  it("asks the origin to wake a sleeping routed host before work, then reconnects through it", async () => {
+    useHostRuntimeClock();
+    const route: HostConnection = {
+      id: "via:srv_parent",
+      type: "routed",
+      originServerId: "srv_parent",
+    };
+    const host = makeHost({ connections: [route] });
+    const client = makeConnectedProbeClient(5);
+    const wakes: { originServerId: string; serverId: string }[] = [];
+    const controller = new HostRuntimeController({
+      host,
+      deps: {
+        getClientId: async () => "wake-routed",
+        createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+        connectToDaemon: async () => ({
+          client: client as unknown as DaemonClient,
+          serverId: host.serverId,
+          hostname: host.label,
+        }),
+        wakeVia: async (input) => {
+          wakes.push(input);
+        },
+      },
+    });
+    await controller.start({ autoProbe: false });
+    try {
+      // Online: nothing to wake.
+      await controller.wake();
+      expect(wakes).toEqual([]);
+      client.setConnectionState({
+        status: "disconnected",
+        reason: "host asleep",
+        nextRetryAt: new Date(Date.now() + 30000).toISOString(),
+      });
+      const before = client.ensureConnectedCalls;
+      await controller.wake();
+      expect(wakes).toEqual([{ originServerId: "srv_parent", serverId: host.serverId }]);
+      expect(client.ensureConnectedCalls).toBe(before + 1);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not wake a host that has no routed connection", async () => {
+    const host = makeHost({
+      connections: [{ id: "direct:lan:6767", type: "directTcp", endpoint: "lan:6767" }],
+    });
+    const wakes: unknown[] = [];
+    const controller = new HostRuntimeController({
+      host,
+      deps: {
+        getClientId: async () => "wake-direct",
+        createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+        connectToDaemon: async () => {
+          throw new Error("Direct connection unavailable");
+        },
+        wakeVia: async (input) => {
+          wakes.push(input);
+        },
+      },
+    });
+    await controller.wake();
+    expect(wakes).toEqual([]);
+  });
+
   it("wakes an active routed client before an unrelated direct probe settles", async () => {
     useHostRuntimeClock();
     const route: HostConnection = {
