@@ -366,6 +366,18 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
         }
         return request;
       }
+      if (name === "host.route.offline") {
+        // Handlers run in order until one does not skip; the daemon reads only this flag.
+        for (const handler of this.handlers.get(name) ?? []) {
+          controller.signal.throwIfAborted();
+          const result = await handler(structuredClone(input), {
+            paseo,
+            signal: controller.signal,
+          });
+          if (!isSkipped(result)) return { skipped: false };
+        }
+        return { skipped: true };
+      }
       for (const handler of this.handlers.get(name) ?? []) {
         controller.signal.throwIfAborted();
         try {
@@ -445,4 +457,12 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       this.changed();
     };
   }
+}
+
+function isSkipped(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { skipped?: unknown }).skipped === true
+  );
 }

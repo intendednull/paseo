@@ -1,5 +1,5 @@
 import { validateWorktreePath } from "../../utils/worktree-path.js";
-import type { PluginHookPayload } from "@getpaseo/plugin/server";
+import type { PluginHookPayload, PluginHostRouteOfflineEvent } from "@getpaseo/plugin/server";
 import type { PluginWireBeforeRequests, PluginBeforeResults } from "./lifecycle/index.js";
 import type { SessionOpenWireRequest, AttachedAgentTool } from "./agent-tools.js";
 import type { UsageScope } from "@getpaseo/plugin/server/usage";
@@ -752,6 +752,41 @@ export class PluginRuntime {
     }
   }
 
+  /**
+   * Offers a sleeping host to the plugins that registered `host.route.offline`, in id order, until
+   * one does not skip. Only that flag is read: the daemon keeps its own route target.
+   */
+  async hostRouteOffline(
+    payload: PluginHostRouteOfflineEvent,
+    options: { signal: AbortSignal; timeoutMs: number },
+  ): Promise<"woken" | "skipped"> {
+    const name = "host.route.offline";
+    const plugins = [...this.plugins.values()].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    for (const loaded of plugins) {
+      if (!loaded.hooks.includes(name)) continue;
+      let output: unknown;
+      try {
+        output = await this.request(
+          loaded,
+          { type: "hook", requestId: randomUUID(), name, input: structuredClone(payload) },
+          { signal: options.signal, timeoutMs: options.timeoutMs },
+        );
+      } catch (error) {
+        throw new Error(`Plugin ${loaded.id} ${name} failed: ${describeError(error)}`, {
+          cause: error,
+        });
+      }
+      const skipped =
+        typeof output === "object" &&
+        output !== null &&
+        (output as { skipped?: unknown }).skipped === true;
+      if (!skipped) return "woken";
+    }
+    return "skipped";
+  }
+
   async before<Name extends keyof PluginWireBeforeRequests>(
     name: Name,
     input: PluginWireBeforeRequests[Name],
@@ -1014,6 +1049,8 @@ export class PluginRuntime {
           void send(child, { type: "worktree.cancel", requestId }).catch(() => {});
         if (isInstallationRequest(message))
           void send(child, { type: "provider.installation.cancel", requestId }).catch(() => {});
+        if (message.type === "hook" && message.name === "host.route.offline")
+          void send(child, { type: "hook.cancel", requestId }).catch(() => {});
         signal?.removeEventListener("abort", cancel);
         reject(signal?.reason ?? new Error("Plugin request canceled"));
       };

@@ -23,6 +23,40 @@ export interface PluginHookWorkspace {
   metadata: Record<string, JsonValue>;
 }
 
+/** A connected host as the daemon saw it when a route to it found it offline. A copy. */
+export interface PluginHookHost {
+  registrationId: string;
+  serverId: string;
+  label: string | null;
+  metadata: Readonly<Record<string, string>>;
+  status: "connecting" | "offline";
+  error: { code: string; message: string } | null;
+  lastOnlineAt: string | null;
+}
+
+/** Operations that carry work to a host; status reads and listings never wake one. */
+export type PluginHostRouteOperation =
+  | "create_agent"
+  | "create_workspace"
+  | "send_agent_prompt"
+  | "session_route";
+
+export interface PluginHostRouteOfflineEvent {
+  host: PluginHookHost;
+  operation: PluginHostRouteOperation;
+  /** The daemon agent behind an MCP host operation; `null` for a person's session route. */
+  caller: { agentId: string; labels: Readonly<Record<string, string>> } | null;
+  /** When the daemon stops waiting for the host (ISO 8601). */
+  deadline: string;
+}
+
+/**
+ * `{ skipped: true }` says this plugin does not manage the host: when every handler skips, the route
+ * fails at once as it does without the hook. Anything else means the plugin woke the host (or tried);
+ * the daemon then reconnects and waits for it. No value can change where the route goes.
+ */
+export type PluginHostRouteOfflineResult = { skipped: true } | void;
+
 export interface PluginHookWorktree {
   path: string;
   branch: string;
@@ -159,6 +193,10 @@ export type PluginHooks = {
   };
 } & { [Name in keyof PluginHookEvents]: { payload: PluginHookEvents[Name] } } & {
   "worktree.create.after": { payload: { worktree: PluginHookWorktree } };
+  "host.route.offline": {
+    payload: PluginHostRouteOfflineEvent;
+    result: PluginHostRouteOfflineResult;
+  };
 };
 
 export type PluginHookPayload<Name extends keyof PluginHooks> = {
@@ -217,6 +255,7 @@ export const pluginHookRegistry = {
   "agent.turn.after": { waits: false },
   "agent.permission.before": { waits: false },
   "agent.permission.after": { waits: false },
+  "host.route.offline": { waits: true },
 } as const satisfies Record<keyof PluginHooks, { waits: boolean }>;
 
 // COMPAT(pluginHookNames): added in v0.14, remove after 2027-04-30

@@ -50,6 +50,7 @@ interface PluginRuntimePort {
   drainEvents?: PluginRuntime["drainEvents"];
   before?: PluginLifecycle["before"];
   wait?: PluginLifecycle["wait"];
+  hostRouteOffline?: PluginRuntime["hostRouteOffline"];
   hasWorktreeManager?: PluginWorktreeManagerRuntime["hasWorktreeManager"];
   createWorktree?: PluginWorktreeManagerRuntime["createWorktree"];
   removeWorktree?: PluginWorktreeManagerRuntime["removeWorktree"];
@@ -183,6 +184,10 @@ export class PluginService {
 
   readonly wait: PluginLifecycle["wait"] = async (name, payload) => {
     await this.runtime.wait?.(name, payload);
+  };
+
+  readonly hostRouteOffline: PluginRuntime["hostRouteOffline"] = async (payload, options) => {
+    return (await this.runtime.hostRouteOffline?.(payload, options)) ?? "skipped";
   };
 
   async drainEvents(): Promise<void> {

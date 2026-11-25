@@ -65,6 +65,7 @@ Paseo only sees the returned promise, so detached work gets no error reporting a
 | `agent.turn.after`        | no    | `{ agent, turnId, outcome }`              |                                                                |
 | `agent.permission.before` | no    | `{ agent, request }`                      |                                                                |
 | `agent.permission.after`  | no    | `{ agent, requestId, resolution }`        |                                                                |
+| `host.route.offline`      | yes   | `{ host, operation, caller, deadline }`   | Nothing; return `{ skipped: true }` for a host you don't wake  |
 
 ## Shared payloads
 
@@ -636,6 +637,19 @@ A pending request is answered or cleared. Receives `{ agent, requestId, resoluti
 ```ts
 server.addHook("agent.permission.after", async ({ agent, requestId, resolution }) => {
   console.log(agent, requestId, resolution);
+});
+```
+
+## host.route.offline
+
+A route that carries work (`create_agent`, `create_workspace`, `send_agent_prompt` from the daemon MCP, or an app session route opened with `wake`) targets a connected host that is offline. The hook runs on the daemon that owns the registration. Wake the host, then resolve: the daemon resets the host's link, so it reconnects without backoff, and waits until the host is online or `deadline` passes (`daemon.connectedHosts.wakeTimeoutSeconds`, default 90). Status reads and listings never fire it.
+
+Return `{ skipped: true }` when you don't manage the host; when every handler skips, the route fails at once as it does without the hook. Throw to fail the route: the error says the host is asleep, includes your message, and keeps the code `host_offline`. Nothing you return changes where the route goes, and the payload is a copy without the connection string. Disabled hosts and hosts in `error` are not offered. Concurrent routes to one host share one call.
+
+```ts
+server.addHook("host.route.offline", async ({ host, operation }, { signal }) => {
+  if (host.metadata["managed-by"] !== "my-tool") return { skipped: true };
+  await wakeMyHost(host.metadata["host-name"], { signal });
 });
 ```
 
