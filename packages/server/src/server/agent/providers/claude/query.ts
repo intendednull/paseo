@@ -7,6 +7,7 @@ import {
 } from "../../provider-launch-config.js";
 import { buildSelfNodeCommand, createExternalProcessEnv } from "../../../paseo-env.js";
 import { spawnProcess } from "../../../../utils/spawn.js";
+import { moveInlineMcpConfigToFiles } from "./mcp-config-file.js";
 
 // Keep the raw SDK query import in this module only. Claude process launch behavior
 // must stay shared between production and tests so Windows .cmd/.bat handling cannot
@@ -61,7 +62,11 @@ function applyRuntimeSettingsToClaudeOptions(
   return {
     ...options,
     spawnClaudeCodeProcess: (spawnOptions) => {
-      const resolved = resolveClaudeSpawnCommand(spawnOptions, runtimeSettings);
+      const resolvedCommand = resolveClaudeSpawnCommand(spawnOptions, runtimeSettings);
+      // MCP server headers and env (the daemon's Agent MCP token among them) go to a
+      // private file, not onto the command line any local user can read.
+      const mcpConfig = moveInlineMcpConfigToFiles(resolvedCommand.args);
+      const resolved = { command: resolvedCommand.command, args: mcpConfig.args };
       // When the SDK passes a default JS runtime ("node"/"bun"), replace it with
       // process.execPath — the actual node binary running the daemon. This avoids
       // PATH lookup failures in the managed runtime bundle.
@@ -82,18 +87,28 @@ function applyRuntimeSettingsToClaudeOptions(
         : null;
       const command = selfNodeCommand?.command ?? resolved.command;
       const args = selfNodeCommand?.args ?? resolved.args;
-      const child = spawnProcess(command, args, {
-        cwd: spawnOptions.cwd,
-        ...(selfNodeCommand
-          ? { env: selfNodeCommand.env, envMode: "internal" as const }
-          : providerEnvSpec),
-        signal: spawnOptions.signal,
-        stdio: ["pipe", "pipe", "pipe"],
-        // Bypass cmd.exe on Windows: the SDK passes --mcp-config with inline JSON
-        // containing double quotes, which cmd.exe mangles (strips quotes, breaks parsing).
-        // The command is always a resolved binary path, so shell routing is unnecessary.
-        shell: false,
-      });
+      let child: ChildProcess;
+      try {
+        child = spawnProcess(command, args, {
+          cwd: spawnOptions.cwd,
+          ...(selfNodeCommand
+            ? { env: selfNodeCommand.env, envMode: "internal" as const }
+            : providerEnvSpec),
+          signal: spawnOptions.signal,
+          stdio: ["pipe", "pipe", "pipe"],
+          // Bypass cmd.exe on Windows: the SDK's other flags (--settings, --agents) can
+          // carry inline JSON with double quotes, which cmd.exe mangles.
+          // The command is always a resolved binary path, so shell routing is unnecessary.
+          shell: false,
+        });
+      } catch (error) {
+        mcpConfig.cleanup();
+        throw error;
+      }
+      // Claude Code reads the file at startup. A restarted query is a new process with
+      // its own file, so each file goes with its process.
+      child.once("exit", mcpConfig.cleanup);
+      child.once("error", mcpConfig.cleanup);
       onChildProcess?.(child);
       if (typeof options.stderr === "function") {
         child.stderr?.on("data", (chunk: Buffer | string) => {

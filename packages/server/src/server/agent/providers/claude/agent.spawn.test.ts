@@ -1,11 +1,14 @@
 import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type {
   Options,
   Query,
   SpawnOptions as ClaudeSpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import * as spawnUtils from "../../../../utils/spawn.js";
@@ -41,8 +44,18 @@ function createChildProcessStub(): ChildProcess {
 }
 
 describe("Claude spawn override", () => {
+  // The spawn hook writes MCP config files under $XDG_RUNTIME_DIR; keep them out of the real one.
+  let runtimeDir: string;
+
+  beforeEach(() => {
+    runtimeDir = mkdtempSync(join(tmpdir(), "paseo-claude-spawn-test-"));
+    vi.stubEnv("XDG_RUNTIME_DIR", runtimeDir);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(runtimeDir, { recursive: true, force: true });
   });
 
   test("bypasses the shell when spawning Claude Code", async () => {
@@ -101,5 +114,58 @@ describe("Claude spawn override", () => {
     expect(claudeSpawnCall).toBeDefined();
     const spawnOptions = claudeSpawnCall?.[2];
     expect(spawnOptions?.shell).toBe(false);
+  });
+
+  test("passes MCP config through a private file removed when Claude Code exits", async () => {
+    const secret = "Bearer spawn-test-capability-token";
+    const inlineConfig = JSON.stringify({
+      mcpServers: {
+        paseo: {
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=a1",
+          headers: { Authorization: secret },
+        },
+      },
+    });
+    let capturedOptions: Options | undefined;
+    const queryFactory = vi.fn(({ options }: ClaudeQueryInput) => {
+      capturedOptions = options;
+      return createQueryMock([]);
+    });
+    const child = createChildProcessStub();
+    const spawnSpy = vi.spyOn(spawnUtils, "spawnProcess").mockReturnValue(child);
+    const client = new ClaudeAgentClient({
+      logger: createTestLogger(),
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+
+    try {
+      await session.run("mcp config file").catch(() => undefined);
+      capturedOptions?.spawnClaudeCodeProcess?.({
+        command: "/test/claude/bin",
+        args: ["--mcp-config", inlineConfig, "--verbose"],
+        cwd: process.cwd(),
+        env: {},
+        signal: new AbortController().signal,
+      } satisfies ClaudeSpawnOptions);
+    } finally {
+      await session.close();
+    }
+
+    const claudeSpawnCall = spawnSpy.mock.calls.find(([, args]) => args.includes("--verbose"));
+    expect(claudeSpawnCall).toBeDefined();
+    const args = claudeSpawnCall?.[1] ?? [];
+    expect(args.join(" ")).not.toContain(secret);
+    const configPath = args[args.indexOf("--mcp-config") + 1];
+    expect(readFileSync(configPath, "utf8")).toBe(inlineConfig);
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+
+    expect(configPath.startsWith(runtimeDir)).toBe(true);
+
+    child.emit("exit", 0, null);
+    expect(existsSync(configPath)).toBe(false);
+    expect(readdirSync(runtimeDir)).toEqual([]);
   });
 });

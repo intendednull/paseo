@@ -56,6 +56,7 @@ The commit trailers are authoritative; this is the summary.
 | feat(app): stream large session file downloads to disk   | upstream streams session downloads directly to disk        |
 | feat(server): send focus instructions on idle compaction | upstream supports focus instructions for idle compaction   |
 | fix(server): an agent's steer never stops a running turn | upstream stops replacing turns that decline an agent steer |
+| fix(server): keep MCP headers off Claude Code's argv     | upstream passes Claude MCP config off the command line     |
 
 ## Branches
 
