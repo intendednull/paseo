@@ -26,12 +26,15 @@ npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/client --wo
   src/server/agent/providers/claude/agent.spawn.test.ts \
   src/server/agent/providers/codex-app-server-agent.test.ts \
   src/server/agent/providers/opencode/v2/agent.test.ts \
-  src/server/agent/providers/opencode/v2/timeline.test.ts)
+  src/server/agent/providers/opencode/v2/timeline.test.ts \
+  src/server/connected-hosts/wake.e2e.test.ts src/server/agent/host-operations \
+  src/server/config.test.ts src/server/persisted-config-json-schema.test.ts)
 (cd packages/client && npx vitest run \
   src/daemon-client.test.ts -t "streamFile|readFile")
 (cd packages/app && npx vitest run --project unit \
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \
-  src/stores/sidebar-view-store.test.ts src/stores/download-store.test.ts src/i18n)
+  src/stores/sidebar-view-store.test.ts src/stores/download-store.test.ts src/i18n \
+  src/runtime/host-runtime.test.ts)
 npm run test --workspace=@getpaseo/desktop
 '

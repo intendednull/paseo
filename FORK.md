@@ -57,6 +57,9 @@ The commit trailers are authoritative; this is the summary.
 | feat(server): send focus instructions on idle compaction | upstream supports focus instructions for idle compaction   |
 | fix(server): an agent's steer never stops a running turn | upstream stops replacing turns that decline an agent steer |
 | fix(server): keep MCP headers off Claude Code's argv     | upstream passes Claude MCP config off the command line     |
+| feat(plugin): add the host.route.offline hook            | upstream ships a host-offline/wake hook                    |
+| feat(server): wake a sleeping connected host for work    | upstream wakes offline connected hosts before routing work |
+| feat(app): wake a sleeping routed host when sending      | upstream's app wakes offline routed hosts before sending   |
 
 ## Branches
 
