@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,21 +40,28 @@ if (!architectures) {
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const appDir = path.join(root, "packages/app");
-const appPkg = JSON.parse(readFileSync(path.join(appDir, "package.json"), "utf8"));
+const appPkg = JSON.parse(
+  readFileSync(path.join(appDir, "package.json"), "utf8")
+);
 
 const signingDir =
-  process.env.PASEO_ANDROID_SIGNING_DIR ?? path.join(os.homedir(), ".config/paseo-android-signing");
+  process.env.PASEO_ANDROID_SIGNING_DIR ??
+  path.join(os.homedir(), ".config/paseo-android-signing");
 const keystorePath =
-  process.env.PASEO_ANDROID_SIGNING_KEYSTORE ?? path.join(signingDir, "paseo-fork.keystore");
+  process.env.PASEO_ANDROID_SIGNING_KEYSTORE ??
+  path.join(signingDir, "paseo-fork.keystore");
 const passwordFilePath =
-  process.env.PASEO_ANDROID_SIGNING_PASSWORD_FILE ?? path.join(signingDir, "keystore.password");
+  process.env.PASEO_ANDROID_SIGNING_PASSWORD_FILE ??
+  path.join(signingDir, "keystore.password");
 const keyAlias = process.env.PASEO_ANDROID_SIGNING_KEY_ALIAS ?? "paseo-fork";
 
 if (!existsSync(keystorePath)) {
   throw new Error(`Android signing keystore not found at ${keystorePath}`);
 }
 if (!existsSync(passwordFilePath)) {
-  throw new Error(`Android signing password file not found at ${passwordFilePath}`);
+  throw new Error(
+    `Android signing password file not found at ${passwordFilePath}`
+  );
 }
 
 const env = {
@@ -85,16 +93,36 @@ if (existsSync(skiaDir) && !existsSync(path.join(skiaDir, "libs/android"))) {
   run("node", ["scripts/install-libs.js"], skiaDir);
 }
 
-const enrichedMarkdownDir = path.join(appDir, "node_modules/react-native-enriched-markdown");
+// Resolve as Node does from the app: since v0.17.4 the package is a workspace
+// (packages/react-native-enriched-markdown), not a nested app dependency.
+function resolvePackageDir(name) {
+  try {
+    return path.dirname(
+      createRequire(path.join(appDir, "package.json")).resolve(
+        `${name}/package.json`
+      )
+    );
+  } catch {
+    return null;
+  }
+}
+
+const enrichedMarkdownDir = resolvePackageDir("react-native-enriched-markdown");
 if (
-  existsSync(enrichedMarkdownDir) &&
-  !existsSync(path.join(enrichedMarkdownDir, "cpp/highlight/vendor/tree-sitter/src"))
+  enrichedMarkdownDir &&
+  !existsSync(
+    path.join(enrichedMarkdownDir, "cpp/highlight/vendor/tree-sitter/src")
+  )
 ) {
   run("node", ["postinstall.mjs"], enrichedMarkdownDir, { INIT_CWD: appDir });
 }
 
 if (!skipDeps) {
-  run("npm", ["run", "generate:validators", "--workspace=@getpaseo/protocol"], root);
+  run(
+    "npm",
+    ["run", "generate:validators", "--workspace=@getpaseo/protocol"],
+    root
+  );
   run("npm", ["run", "build:app-deps"], root);
 }
 
@@ -119,7 +147,9 @@ const gradleArgs = [
 ];
 
 if (env.PASEO_ANDROID_AAPT2_OVERRIDE) {
-  gradleArgs.push(`-Pandroid.aapt2FromMavenOverride=${env.PASEO_ANDROID_AAPT2_OVERRIDE}`);
+  gradleArgs.push(
+    `-Pandroid.aapt2FromMavenOverride=${env.PASEO_ANDROID_AAPT2_OVERRIDE}`
+  );
 }
 
 run("./gradlew", gradleArgs, path.join(appDir, "android"));
@@ -130,9 +160,11 @@ const destination = outPath
 mkdirSync(path.dirname(destination), { recursive: true });
 copyFileSync(
   path.join(appDir, "android/app/build/outputs/apk/release/app-release.apk"),
-  destination,
+  destination
 );
 
 console.log(`\nSigned fork release APK: ${destination}`);
-console.log(`Variant: ${env.APP_VARIANT} | Target: ${target} (${architectures})`);
+console.log(
+  `Variant: ${env.APP_VARIANT} | Target: ${target} (${architectures})`
+);
 console.log(`Keystore: ${keystorePath} (alias: ${keyAlias})\n`);
