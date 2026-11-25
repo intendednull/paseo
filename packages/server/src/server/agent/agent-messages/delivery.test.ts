@@ -1,4 +1,8 @@
-import { AgentTurnBusyError, AgentTurnChangedError } from "../agent-prompt.js";
+import {
+  AgentSteerDeclinedError,
+  AgentTurnBusyError,
+  AgentTurnChangedError,
+} from "../agent-prompt.js";
 import { expect, test } from "vitest";
 import { createAgentMessageDelivery, parseAgentMessages } from "./index.js";
 import type { AgentPromptInput } from "../agent-sdk-types.js";
@@ -1228,6 +1232,7 @@ test("a steer that misses the turn's end goes again with the messages it carries
   const delivery = createAgentMessageDelivery({
     schedule: clock.schedule,
     isRunning: () => running,
+    canSteer: () => true,
     dispatch: async (request) => {
       if (running) {
         // The turn ended before the provider took the steer.
@@ -1301,7 +1306,7 @@ test.each([
     running: true,
     canSteer: false,
     guidance:
-      'Queued, not delivered yet. The agent is working and reads your message when its current turn ends. If the message cannot wait, send a short follow-up with activeTurnBehavior "interrupt" (it stops the turn and starts a new one). This agent\'s provider cannot steer, so "steer" also stops the turn. The follow-up carries this message ahead of it, so do not send this message again.',
+      'Queued, not delivered yet. The agent is working and reads your message when its current turn ends. If the message cannot wait, send a short follow-up with activeTurnBehavior "interrupt" (it stops the turn and starts a new one). This agent\'s provider cannot steer, so "steer" also waits for the turn to end. The follow-up carries this message ahead of it, so do not send this message again.',
   },
   {
     behavior: "steer",
@@ -1315,7 +1320,7 @@ test.each([
     running: true,
     canSteer: false,
     guidance:
-      "This agent's provider cannot steer, so your message interrupts the running turn. A new turn starts with your message.",
+      'Queued: this agent\'s provider cannot steer, so your message waits until its current turn ends. If the message cannot wait, send a short follow-up with activeTurnBehavior "interrupt" (it stops the turn and starts a new one). The follow-up carries this message ahead of it, so do not send this message again.',
   },
   {
     behavior: "interrupt",
@@ -1922,5 +1927,184 @@ test("held messages stay held when the message that reopened the queue is withdr
   expect(recipient.delivery.hasPending("recipient")).toBe(false);
 
   expect((await recipient.person("continue", "person-1")).ids).toEqual(["older", "person-1"]);
+  await recipient.delivery.close();
+});
+
+/**
+ * A recipient whose running turn takes or declines steer-only prompts. A declined steer must not
+ * start or replace a turn: the double fails the test if a non-idle prompt would replace one.
+ */
+function createSteerRecipient(options: {
+  canSteer: boolean;
+  takesSteer: boolean;
+  running?: boolean;
+}) {
+  const clock = createClock();
+  const settleListeners = new Set<(recipientId: string) => void>();
+  let running = options.running ?? true;
+  const attempts: Array<{
+    ids: readonly string[];
+    behavior: string;
+    idleOnly: boolean;
+    steerOnly: boolean;
+  }> = [];
+  const replaced: string[][] = [];
+  const delivery = createAgentMessageDelivery({
+    schedule: clock.schedule,
+    isRunning: () => running,
+    canSteer: () => options.canSteer,
+    subscribe: (listener) => {
+      settleListeners.add(listener);
+      return () => settleListeners.delete(listener);
+    },
+    dispatch: async (request) => {
+      attempts.push({
+        ids: request.messageIds,
+        behavior: request.activeTurnBehavior,
+        idleOnly: request.idleOnly,
+        steerOnly: request.steerOnly,
+      });
+      if (!request.admit()) throw new Error("The prompt was not admitted");
+      if (running && request.idleOnly) throw new AgentTurnBusyError("running");
+      if (running && request.steerOnly) {
+        if (options.canSteer && options.takesSteer) return "steered";
+        throw new AgentSteerDeclinedError("declined");
+      }
+      if (running) replaced.push([...request.messageIds]);
+      running = true;
+      return "turn_started";
+    },
+    onError: (error) => {
+      throw error;
+    },
+  });
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  return {
+    clock,
+    delivery,
+    attempts,
+    replaced,
+    settle,
+    send(activeTurnBehavior: "queue" | "steer" | "interrupt", messageId: string) {
+      return delivery.enqueue({
+        recipientId: "recipient",
+        source: { kind: "agent-message", agentId: "sender" },
+        messageId,
+        prompt: messageId,
+        activeTurnBehavior,
+      });
+    },
+    async endTurn() {
+      running = false;
+      for (const listener of settleListeners) listener("recipient");
+      await settle();
+      await settle();
+    },
+  };
+}
+
+test("an agent steer the running turn declines waits for the turn to end instead of replacing it", async () => {
+  const recipient = createSteerRecipient({ canSteer: true, takesSteer: false });
+  const report = recipient.send("queue", "report");
+  const steer = recipient.send("steer", "steer");
+  await expect(steer.outcome).resolves.toContain(
+    "Queued: the agent's provider did not take the steer into its running turn",
+  );
+  await expect(steer.outcome).resolves.toContain("The turn was not stopped.");
+  // One steer-only attempt carrying the queue ahead of it, then nothing while the turn runs.
+  expect(recipient.attempts).toEqual([
+    { ids: ["report", "steer"], behavior: "steer", idleOnly: false, steerOnly: true },
+  ]);
+  for (let tick = 0; tick < 5; tick++) {
+    recipient.clock.advance(2000);
+    await recipient.settle();
+  }
+  expect(recipient.attempts.filter((attempt) => !attempt.idleOnly)).toHaveLength(1);
+  expect(recipient.replaced).toEqual([]);
+  expect(recipient.delivery.hasPending("recipient")).toBe(true);
+
+  await recipient.endTurn();
+  await expect(Promise.all([report.dispatched, steer.dispatched])).resolves.toEqual([
+    "turn_started",
+    "turn_started",
+  ]);
+  expect(recipient.attempts.at(-1)).toEqual({
+    ids: ["report", "steer"],
+    behavior: "steer",
+    idleOnly: true,
+    steerOnly: false,
+  });
+  expect(recipient.replaced).toEqual([]);
+  await recipient.delivery.close();
+});
+
+test("an agent steer to a recipient that cannot steer waits without touching the turn", async () => {
+  const recipient = createSteerRecipient({ canSteer: false, takesSteer: false });
+  const steer = recipient.send("steer", "steer");
+  expect(steer.activeTurnBehavior).toBe("steer");
+  expect(steer.guidance).toContain(
+    "Queued: this agent's provider cannot steer, so your message waits until its current turn ends.",
+  );
+  await expect(steer.outcome).resolves.toBe(steer.guidance);
+  for (let tick = 0; tick < 5; tick++) {
+    recipient.clock.advance(2000);
+    await recipient.settle();
+  }
+  expect(recipient.attempts.filter((attempt) => !attempt.idleOnly)).toEqual([]);
+  await recipient.endTurn();
+  await expect(steer.dispatched).resolves.toBe("turn_started");
+  expect(recipient.replaced).toEqual([]);
+  await recipient.delivery.close();
+});
+
+test("an agent steer the running turn takes is steered and its outcome says so", async () => {
+  const recipient = createSteerRecipient({ canSteer: true, takesSteer: true });
+  const steer = recipient.send("steer", "steer");
+  expect(steer.guidance).toContain("Steering the running turn.");
+  await expect(steer.dispatched).resolves.toBe("steered");
+  await expect(steer.outcome).resolves.toContain("Steered: the message joined the running turn.");
+  expect(recipient.attempts).toEqual([
+    { ids: ["steer"], behavior: "steer", idleOnly: false, steerOnly: true },
+  ]);
+  await recipient.delivery.close();
+});
+
+test("a steer to an idle recipient starts a turn", async () => {
+  const recipient = createSteerRecipient({ canSteer: false, takesSteer: false, running: false });
+  const steer = recipient.send("steer", "steer");
+  await expect(steer.dispatched).resolves.toBe("turn_started");
+  await expect(steer.outcome).resolves.toBe(
+    "The agent is idle, so your message starts a turn now.",
+  );
+  expect(recipient.replaced).toEqual([]);
+  await recipient.delivery.close();
+});
+
+test("an agent interrupt still replaces the running turn and is never steer-only", async () => {
+  const recipient = createSteerRecipient({ canSteer: true, takesSteer: false });
+  const queued = recipient.send("queue", "queued");
+  const interrupt = recipient.send("interrupt", "interrupt");
+  await expect(Promise.all([queued.dispatched, interrupt.dispatched])).resolves.toEqual([
+    "turn_started",
+    "turn_started",
+  ]);
+  expect(recipient.attempts).toEqual([
+    { ids: ["queued", "interrupt"], behavior: "interrupt", idleOnly: false, steerOnly: false },
+  ]);
+  expect(recipient.replaced).toEqual([["queued", "interrupt"]]);
+  await expect(interrupt.outcome).resolves.toContain("Interrupting the running turn.");
+  await recipient.delivery.close();
+});
+
+test("a declined steer followed by an interrupt goes out with the interrupt, in order", async () => {
+  const recipient = createSteerRecipient({ canSteer: true, takesSteer: false });
+  const steer = recipient.send("steer", "steer");
+  await steer.outcome;
+  const interrupt = recipient.send("interrupt", "interrupt");
+  await expect(Promise.all([steer.dispatched, interrupt.dispatched])).resolves.toEqual([
+    "turn_started",
+    "turn_started",
+  ]);
+  expect(recipient.replaced).toEqual([["steer", "interrupt"]]);
   await recipient.delivery.close();
 });

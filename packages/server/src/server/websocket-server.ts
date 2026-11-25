@@ -767,6 +767,7 @@ export class VoiceAssistantWebSocketServer {
           prompt: batch.prompt,
           activeTurnBehavior: batch.activeTurnBehavior,
           idleOnly: batch.idleOnly,
+          steerOnly: batch.steerOnly,
           admit: batch.admit,
           sessionMode: batch.sessionMode,
           clearPendingPermissions: batch.clearPendingPermissions,

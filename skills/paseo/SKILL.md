@@ -97,7 +97,7 @@ Agent-scoped `create_agent` defaults `notifyOnFinish` to true. Set it to `false`
 Leave `activeTurnBehavior` out unless the message cannot wait. It decides what happens when the agent is mid-turn:
 
 - `queue` (default): the message waits for the turn to end.
-- `steer`: the agent reads the message at its next step and keeps working. If its provider cannot steer, the turn is interrupted instead.
+- `steer`: the agent reads the message at its next step and keeps working. If its provider cannot steer, or refuses this steer, the message waits for the turn to end instead; a steer never stops the turn. `guidance` says which happened.
 - `interrupt`: the turn stops, and a new turn starts with the message.
 
 Read `guidance` in the response. If it says your message is waiting and the message cannot wait, such as a course correction, send a short follow-up with `steer` or `interrupt`. Do not resend the message: the follow-up carries it, and a resent message is read twice.

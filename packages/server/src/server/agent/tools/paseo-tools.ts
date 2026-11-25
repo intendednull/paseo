@@ -2,7 +2,7 @@ import type { ChangeRequestWatches } from "../change-request-watches/index.js";
 import { changeRequestStatusSchema } from "../../../services/change-request-source.js";
 import { registerPluginTools } from "./plugin-tools.js";
 import type { FinishSubscriptions, FinishRegistration } from "../finish-subscriptions/index.js";
-import type { AgentMessageDelivery } from "../agent-messages/index.js";
+import { settledGuidance, type AgentMessageDelivery } from "../agent-messages/index.js";
 import {
   createHostResolver,
   HostOperationRejectedError,
@@ -1302,7 +1302,7 @@ function createToolCatalog(
   const agentToAgentSendAgentPromptInputSchema = {
     ...commonSendAgentPromptInputSchema,
     activeTurnBehavior: AgentActiveTurnBehaviorSchema.optional().describe(
-      'Leave this out unless the message cannot wait. Default "queue": the message waits until the agent\'s running turn ends. "steer": the message joins the running turn; a provider that cannot steer interrupts the turn instead. "interrupt": the running turn stops and a new turn starts with the message. A steer or interrupt carries the messages you queued before it, in order.',
+      'Leave this out unless the message cannot wait. Default "queue": the message waits until the agent\'s running turn ends. "steer": the message joins the running turn; if the agent\'s provider cannot steer or refuses this steer, the message waits for the turn to end instead, and a steer never stops the turn. "interrupt": the running turn stops and a new turn starts with the message. A steer or interrupt carries the messages you queued before it, in order.',
     ),
     notifyOnFinish: z
       .boolean()
@@ -2058,6 +2058,8 @@ function createToolCatalog(
         void receipt.dispatched.catch(() => {
           rejectNotification();
         });
+        // A steer reports whether it joined the running turn or waits for the turn to end.
+        const guidance = await settledGuidance(receipt);
         return {
           content: [],
           structuredContent: {
@@ -2066,9 +2068,7 @@ function createToolCatalog(
             messageId: receipt.messageId,
             activeTurnBehavior: receipt.activeTurnBehavior,
             status: agentManager.getAgent(agentId)?.lifecycle ?? "idle",
-            guidance: notifying
-              ? `${receipt.guidance} ${PROMPTED_AGENT_NOTIFICATION_GUIDANCE}`
-              : receipt.guidance,
+            guidance: notifying ? `${guidance} ${PROMPTED_AGENT_NOTIFICATION_GUIDANCE}` : guidance,
           },
         };
       }

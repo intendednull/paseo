@@ -24,9 +24,10 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
-> & {
-  reloadAgentSession(agentId: string): Promise<unknown>;
-};
+> &
+  Partial<Pick<AgentManager, "steerActiveTurnOnly">> & {
+    reloadAgentSession(agentId: string): Promise<unknown>;
+  };
 
 import { AgentTurnBusyError } from "./agent-sdk-types.js";
 
@@ -34,6 +35,12 @@ export { AgentTurnBusyError };
 
 /** The turn a steer targeted ended or changed before the provider took the steer. */
 export class AgentTurnChangedError extends Error {}
+
+/**
+ * A steer-only prompt found a running turn that would not take it: the provider cannot steer,
+ * or refused this steer. The turn is untouched; the prompt waits for the turn to end.
+ */
+export class AgentSteerDeclinedError extends Error {}
 
 export interface StartAgentRunOptions {
   idleOnly?: boolean;
@@ -45,6 +52,11 @@ export interface StartAgentRunOptions {
   runOptions?: AgentRunOptions;
   /** Ask the provider to deny permissions blocking this steer. */
   clearPendingPermissions?: boolean;
+  /**
+   * Join a running turn only through an accepted steer, never by replacing it. A declined steer
+   * throws {@link AgentSteerDeclinedError}; with no turn running the prompt starts one.
+   */
+  steerOnly?: boolean;
 }
 
 export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
@@ -53,6 +65,28 @@ export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_starte
 export type PromptDispatchResult =
   | { disposition: "turn_started"; started: Promise<void> }
   | { disposition: Exclude<PromptDispatchDisposition, "turn_started"> };
+
+/**
+ * A steer-only prompt joins the running turn through an accepted steer, or throws
+ * {@link AgentSteerDeclinedError} and leaves the turn alone. With no turn running it starts one.
+ */
+async function steerRunningTurnOnly(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  options: StartAgentRunOptions,
+): Promise<{ disposition: "steered" } | null> {
+  const steerOptions = options.clearPendingPermissions
+    ? { ...options.runOptions, clearPendingPermissions: true }
+    : options.runOptions;
+  const result = agentManager.steerActiveTurnOnly
+    ? await agentManager.steerActiveTurnOnly(agentId, prompt, steerOptions)
+    : { status: agentManager.hasInFlightRun(agentId) ? "declined" : "inactive" };
+  if (result.status === "declined") {
+    throw new AgentSteerDeclinedError(`Agent ${agentId} did not take the steer into its turn`);
+  }
+  return result.status === "steered" ? { disposition: "steered" } : null;
+}
 
 async function steerOrReplaceActiveRun(
   agentManager: AgentRunController,
@@ -71,6 +105,7 @@ async function steerOrReplaceActiveRun(
   if (options?.activeTurnBehavior !== "steer") {
     return null;
   }
+  if (options.steerOnly) return await steerRunningTurnOnly(agentManager, agentId, prompt, options);
   const steerOptions = options.clearPendingPermissions
     ? { ...options.runOptions, clearPendingPermissions: true }
     : options.runOptions;
@@ -89,6 +124,24 @@ async function steerOrReplaceActiveRun(
   return null;
 }
 
+/** A turn that started meanwhile is not replaced by a steer: the steer waits for it instead. */
+function streamWithoutReplacing(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  options: StartAgentRunOptions | undefined,
+  promptStart: ForegroundPromptStart,
+): AsyncGenerator<import("./agent-sdk-types.js").AgentStreamEvent> {
+  try {
+    return agentManager.streamAgent(agentId, prompt, options?.runOptions, promptStart);
+  } catch (error) {
+    if (options?.steerOnly && error instanceof AgentTurnBusyError) {
+      throw new AgentSteerDeclinedError(`Agent ${agentId} is running`);
+    }
+    throw error;
+  }
+}
+
 async function startOrReplaceRun(
   agentManager: AgentRunController,
   agentId: string,
@@ -102,7 +155,7 @@ async function startOrReplaceRun(
   const replaced = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const iterator = replaced
     ? await agentManager.replaceAgentRun(agentId, prompt, options?.runOptions, promptStart)
-    : agentManager.streamAgent(agentId, prompt, options?.runOptions, promptStart);
+    : streamWithoutReplacing(agentManager, agentId, prompt, options, promptStart);
   return { iterator, replaced };
 }
 
@@ -260,6 +313,8 @@ export async function unarchiveAgentState(
 
 export interface SendPromptToAgentParams {
   idleOnly?: boolean;
+  /** See {@link StartAgentRunOptions.steerOnly}. */
+  steerOnly?: boolean;
   admit?: StartAgentRunOptions["admit"];
   /** Awaited after the agent is loaded and its mode is set, before the prompt is handed to a run. */
   beforeDispatch?: () => Promise<void>;
@@ -443,6 +498,14 @@ export async function sendPreparedPromptToAgent(
   if (params.idleOnly && params.agentManager.hasInFlightRun(params.agentId)) {
     throw new AgentTurnBusyError(`Agent ${params.agentId} is running`);
   }
+  // An explicit mode belongs to a new turn: a steer-only prompt never changes a running turn's mode.
+  if (
+    params.steerOnly &&
+    params.sessionMode &&
+    params.agentManager.hasInFlightRun(params.agentId)
+  ) {
+    throw new AgentSteerDeclinedError(`Agent ${params.agentId} is running`);
+  }
   if (params.sessionMode) {
     await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
   }
@@ -452,8 +515,9 @@ export async function sendPreparedPromptToAgent(
     throw new Error("Queued agent message was withdrawn");
   }
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: !params.idleOnly,
+    replaceRunning: !params.idleOnly && !params.steerOnly,
     idleOnly: params.idleOnly,
+    steerOnly: params.steerOnly,
     admit: params.admit,
     onDispatch: params.onDispatch,
     activeTurnBehavior: params.activeTurnBehavior,

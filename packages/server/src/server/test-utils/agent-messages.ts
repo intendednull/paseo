@@ -48,6 +48,7 @@ export function createTestAgentMessages(params: {
         unarchive: request.unarchive,
         activeTurnBehavior: request.activeTurnBehavior,
         idleOnly: request.idleOnly,
+        steerOnly: request.steerOnly,
         admit: request.admit,
         clearPendingPermissions: request.clearPendingPermissions,
         runOptions: { clientMessageId: request.messageIds[0] },

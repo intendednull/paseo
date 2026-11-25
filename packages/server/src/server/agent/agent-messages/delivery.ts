@@ -1,4 +1,5 @@
 import {
+  AgentSteerDeclinedError,
   AgentTurnBusyError,
   AgentTurnChangedError,
   type PromptDispatchDisposition,
@@ -7,7 +8,12 @@ import {
 import { randomUUID } from "node:crypto";
 import type { AgentPromptInput, AgentPromptContentBlock } from "../agent-sdk-types.js";
 import { envelopeMessage, prepareAgentMessage, type AgentPromptSource } from "./envelope.js";
-import { describeAgentMessage, type AgentMessageBehavior } from "./guidance.js";
+import {
+  describeAgentMessage,
+  describeSteerOutcome,
+  type AgentMessageBehavior,
+  type SteerOutcome,
+} from "./guidance.js";
 
 /** A message's quiet window closes this long after the latest arrival. */
 const QUIET_MS = 2000;
@@ -33,6 +39,11 @@ interface Receipt {
   activeTurnBehavior: AgentMessageBehavior;
   /** What happens to the message, and how the sender can change it. */
   guidance: string;
+  /**
+   * The guidance once it is known what happened: for a steer into a running turn, after the
+   * recipient took it or declined it; otherwise `guidance` at once.
+   */
+  outcome: Promise<string>;
   dispatched: Promise<PromptDispatchDisposition>;
 }
 interface Admitted extends Message {
@@ -44,6 +55,8 @@ interface Admitted extends Message {
   held: boolean;
   outOfBandDeclined: boolean;
   receipt: Receipt;
+  /** Settle `receipt.outcome`. The first report wins. */
+  report(guidance: string): void;
   resolve(disposition: PromptDispatchDisposition): void;
   reject(error: unknown): void;
 }
@@ -75,6 +88,12 @@ interface DispatchRequest {
   prompt: AgentPromptInput;
   activeTurnBehavior: "steer" | "interrupt";
   idleOnly: boolean;
+  /**
+   * A steer that must not cancel or replace a running turn. When the recipient cannot or will
+   * not take it into the turn, the dispatch throws AgentSteerDeclinedError and the batch waits
+   * for the turn to end.
+   */
+  steerOnly: boolean;
   /**
    * Claim this exact prompt at provider admission. A withdrawn message or a Stop that reached
    * the recipient first invalidates it.
@@ -199,6 +218,25 @@ function modeGroups(messages: Admitted[]): Admitted[][] {
  * time acts on the queue. A message stays in the queue until the provider admits the prompt
  * that carries it, so agent messages, a person's prompts, and Stop all decide over the same list.
  */
+/**
+ * The receipt's guidance once its outcome is known, e.g. whether a steer joined the turn or
+ * waits for it to end. Falls back to the admission guidance if the answer takes too long.
+ */
+export async function settledGuidance(
+  receipt: Pick<Receipt, "guidance" | "outcome">,
+  timeoutMs = 10_000,
+): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const fallback = new Promise<string>((resolve) => {
+    timer = setTimeout(() => resolve(receipt.guidance), timeoutMs);
+  });
+  try {
+    return await Promise.race([receipt.outcome, fallback]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createAgentMessageDelivery(dependencies: Dependencies): AgentMessageDelivery {
   const schedule =
     dependencies.schedule ??
@@ -227,9 +265,11 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
     idleOnly: boolean,
     stopped: () => boolean,
   ): DispatchRequest {
+    const interrupting = messages.some((message) => message.urgency === "interrupt");
     return {
       recipientId,
       idleOnly,
+      steerOnly: !idleOnly && !closed && !interrupting,
       admit() {
         if (messages.some(isWithdrawn) || stopped()) return false;
         for (const message of messages) message.state = "claimed";
@@ -238,9 +278,7 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
       messageIds: messages.map((message) => message.receipt.messageId),
       prompt: combine(messages.map(envelope)),
       // A batch that waited for the turn to end is dispatched idle-only, so it never steers.
-      activeTurnBehavior: messages.some((message) => message.urgency === "interrupt")
-        ? "interrupt"
-        : "steer",
+      activeTurnBehavior: interrupting ? "interrupt" : "steer",
       // An interrupt may follow a message that asked for another mode; the latest choice wins.
       sessionMode: messages.findLast((message) => message.sessionMode)?.sessionMode,
       clearPendingPermissions: messages.some((message) => message.clearPendingPermissions),
@@ -257,6 +295,7 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
   /** The message reached its end: delivered, failed, or withdrawn. */
   function settle(message: Admitted, state: "claimed" | "rejected" | "withdrawn"): void {
     message.state = state;
+    if (state !== "claimed") message.report(message.receipt.guidance);
     const inbox = inboxes.get(message.recipientId);
     const index = inbox?.messages.indexOf(message) ?? -1;
     if (!inbox || index < 0) return;
@@ -270,6 +309,7 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
     request: DispatchRequest,
   ): void {
     settle(message, "claimed");
+    message.report(describeSteerOutcome(disposition satisfies SteerOutcome));
     try {
       message.onDispatch?.(disposition);
     } catch (error) {
@@ -281,6 +321,23 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
   /** A dispatch that did not happen leaves its messages queued, each still in its place. */
   function handBack(messages: Admitted[]): void {
     for (const message of messages) if (message.state === "claimed") message.state = "queued";
+  }
+
+  /**
+   * The running turn would not take this dispatch: an idle-only batch found it busy, or it
+   * declined a steer. The batch stays in its place and waits for the turn to end.
+   */
+  function waitsForTurnEnd(error: unknown, request: DispatchRequest): boolean {
+    if (error instanceof AgentTurnBusyError) return request.idleOnly;
+    return error instanceof AgentSteerDeclinedError && request.steerOnly;
+  }
+
+  /** A declined steer is left alone: it waits for the turn to end, like a queued message. */
+  function queueDeclinedSteer(messages: Admitted[]): void {
+    for (const message of messages) {
+      if (message.urgency === "steer") message.urgency = null;
+      message.report(describeSteerOutcome("declined"));
+    }
   }
 
   function fail(message: Admitted, error: unknown): void {
@@ -351,8 +408,9 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
           handBack(messages);
           continue;
         }
-        if (error instanceof AgentTurnBusyError && request.idleOnly) {
+        if (waitsForTurnEnd(error, request)) {
           handBack(messages);
+          if (error instanceof AgentSteerDeclinedError) queueDeclinedSteer(messages);
           return;
         }
         for (const message of messages) fail(message, error);
@@ -537,6 +595,7 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
     inbox.phase = "held";
     inbox.stops++;
     for (const message of inbox.messages) {
+      if (message.urgency === "steer") message.report(describeSteerOutcome("held"));
       message.urgency = null;
       message.held = true;
     }
@@ -578,25 +637,35 @@ export function createAgentMessageDelivery(dependencies: Dependencies): AgentMes
         reject = failed;
       });
       void dispatched.catch(() => undefined);
+      let report!: (guidance: string) => void;
+      const outcome = new Promise<string>((settled) => {
+        report = settled;
+      });
       const activeTurnBehavior = message.activeTurnBehavior ?? "queue";
+      const running = isRunning(message.recipientId);
+      const canSteer = Boolean(dependencies.canSteer?.(message.recipientId));
+      const guidance = describeAgentMessage({ activeTurnBehavior, running, canSteer });
+      // A steer the running turn cannot take waits for it to end instead of replacing it.
+      const waits =
+        activeTurnBehavior === "queue" || (activeTurnBehavior === "steer" && running && !canSteer);
       const receipt: Receipt = {
         status: "queued",
         messageId: message.messageId ?? randomUUID(),
         activeTurnBehavior,
-        guidance: describeAgentMessage({
-          activeTurnBehavior,
-          running: isRunning(message.recipientId),
-          canSteer: Boolean(dependencies.canSteer?.(message.recipientId)),
-        }),
+        guidance,
+        outcome,
         dispatched,
       };
+      // Only a steer into a running turn learns more once the recipient answers it.
+      if (!(activeTurnBehavior === "steer" && running && canSteer)) report(guidance);
       admit({
         ...message,
         receipt,
+        report,
         resolve,
         reject,
         state: "queued",
-        urgency: activeTurnBehavior === "queue" ? null : activeTurnBehavior,
+        urgency: waits ? null : activeTurnBehavior,
         held: false,
         outOfBandDeclined: false,
       });

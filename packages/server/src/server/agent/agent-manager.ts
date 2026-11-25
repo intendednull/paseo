@@ -4306,6 +4306,46 @@ export class AgentManager {
     return result;
   }
 
+  /**
+   * Join a prompt to the running turn only through a steer the provider accepts. Unlike
+   * {@link steerOrReplaceActiveTurn} this never replaces or cancels the turn: a provider without
+   * steering (generic ACP), a quarantined compaction, or a refused steer answers "declined" and
+   * leaves the turn untouched. "inactive" means no turn is running. A turn that is still starting
+   * is awaited first, as for any steer.
+   */
+  async steerActiveTurnOnly(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentSteerOptions,
+  ): Promise<{ status: "steered" | "declined" | "inactive" }> {
+    await this.runs.waitForForegroundStart(agentId);
+    const agent = this.requireSessionAgent(agentId);
+    const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
+    if (!expectedTurnId) {
+      return { status: this.hasInFlightRun(agentId) ? "declined" : "inactive" };
+    }
+    if (!agent.session.steerActiveTurn || agent.session.isCompactionQuarantined?.()) {
+      return { status: "declined" };
+    }
+    const result = await this.runSteerAdmission(agent, expectedTurnId, async () => {
+      const admission = await agent.session.steerActiveTurn!(prompt, {
+        ...options,
+        expectedTurnId,
+      });
+      if (admission.status === "accepted") {
+        await this.recordAcceptedSteer(
+          agent,
+          prompt,
+          options?.clientMessageId,
+          expectedTurnId,
+          admission.providerMessageId,
+        );
+      }
+      return admission;
+    });
+    return { status: result.status === "accepted" ? "steered" : "declined" };
+  }
+
   async steerOrReplaceActiveTurn(
     agentId: string,
     prompt: AgentPromptInput,

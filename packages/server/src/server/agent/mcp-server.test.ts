@@ -3763,7 +3763,7 @@ describe("send_agent_prompt MCP tool", () => {
       steering: "none",
       applied: "queue",
       outcome: "queued",
-      guidance: 'provider cannot steer, so "steer" also stops the turn',
+      guidance: 'provider cannot steer, so "steer" also waits for the turn to end',
     },
     {
       agentScoped: true,
@@ -3771,24 +3771,27 @@ describe("send_agent_prompt MCP tool", () => {
       steering: "accepted",
       applied: "steer",
       outcome: "steered",
-      guidance: "Steering the running turn.",
+      guidance: "Steered: the message joined the running turn.",
     },
+    // An agent's steer never stops a turn: without steering it waits for the turn to end.
     {
       agentScoped: true,
       behavior: "steer",
       steering: "none",
       applied: "steer",
-      outcome: "replaced",
-      guidance: "This agent's provider cannot steer, so your message interrupts the running turn.",
+      outcome: "queued",
+      guidance:
+        "Queued: this agent's provider cannot steer, so your message waits until its current turn ends.",
     },
-    // A provider that can steer may refuse one steer; the turn is replaced all the same.
+    // A provider that can steer may refuse one steer; the turn keeps running and the guidance says so.
     {
       agentScoped: true,
       behavior: "steer",
       steering: "unavailable",
       applied: "steer",
-      outcome: "replaced",
-      guidance: "Steering the running turn.",
+      outcome: "queued",
+      guidance:
+        "Queued: the agent's provider did not take the steer into its running turn, so your message waits until that turn ends. The turn was not stopped.",
     },
     {
       agentScoped: true,
@@ -3800,6 +3803,9 @@ describe("send_agent_prompt MCP tool", () => {
     },
     { agentScoped: false, behavior: undefined, steering: "accepted", outcome: "replaced" },
     { agentScoped: false, behavior: "steer", steering: "accepted", outcome: "steered" },
+    // A person's steer keeps upstream's fallback: it replaces a turn that will not take it.
+    { agentScoped: false, behavior: "steer", steering: "none", outcome: "replaced" },
+    { agentScoped: false, behavior: "steer", steering: "unavailable", outcome: "replaced" },
   ] as const)(
     "$behavior from agent-scoped=$agentScoped to a working agent (steering: $steering) is $outcome",
     async (scenario) => {

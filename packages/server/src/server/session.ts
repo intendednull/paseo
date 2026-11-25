@@ -1,6 +1,10 @@
 import { DiffSession } from "./diff/index.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
-import type { AgentMessageBehavior, AgentMessageDelivery } from "./agent/agent-messages/index.js";
+import {
+  settledGuidance,
+  type AgentMessageBehavior,
+  type AgentMessageDelivery,
+} from "./agent/agent-messages/index.js";
 import { AgentDirectory, type BackgroundVisibility } from "./agent/directory.js";
 import { ConnectedHostSession } from "./connected-hosts/index.js";
 import type { ConnectedHosts } from "./connected-hosts/index.js";
@@ -9194,7 +9198,11 @@ export class Session {
             clearPendingPermissions: false,
           });
           deliveryStatus = "queued";
-          queuedReceipt = receipt;
+          // A steer reports whether it joined the running turn or waits for the turn to end.
+          queuedReceipt = {
+            activeTurnBehavior: receipt.activeTurnBehavior,
+            guidance: await settledGuidance(receipt),
+          };
           queued();
           await receipt.dispatched;
           return;
