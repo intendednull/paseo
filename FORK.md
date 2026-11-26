@@ -65,6 +65,7 @@ The commit trailers are authoritative; this is the summary.
 | fix(server): cancel, grace and lookup fixes for host wakes                 | upstream wakes offline connected hosts before routing work |
 | fix(app): say so when a woken routed host doesn't come online              | upstream's app wakes offline routed hosts before sending   |
 | fix(server): honour a cancel until the send; tell the plugin the time left | upstream wakes offline connected hosts before routing work |
+| fix(app): reorder the sidebar on a 2.5 s tick, not on every update         | upstream steadies the sidebar order under live activity    |
 
 ## Branches
 
