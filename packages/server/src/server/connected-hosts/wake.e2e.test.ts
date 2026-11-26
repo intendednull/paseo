@@ -10,6 +10,7 @@ import { afterEach, expect, test } from "vitest";
 import { createPaseoApi } from "@getpaseo/client";
 import { createHostClient } from "@getpaseo/client/node";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "../test-utils/paseo-daemon.js";
+import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { resolveDaemonVersion } from "../daemon-version.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -66,10 +67,13 @@ async function wakeEndpoint() {
 }
 
 /** A destination daemon that can stop ("sleep") and start again with its identity and agents. */
-async function sleepyHost() {
+async function sleepyHost(
+  options: Pick<Parameters<typeof createTestPaseoDaemon>[0] & {}, "agentClients"> = {},
+) {
   const home = await mkdtemp(join(tmpdir(), "paseo-sleepy-home-"));
   const staticDir = await mkdtemp(join(tmpdir(), "paseo-sleepy-static-"));
   let current: TestPaseoDaemon | null = await createTestPaseoDaemon({
+    ...options,
     paseoHomeRoot: home,
     staticDir,
     cleanup: false,
@@ -93,6 +97,7 @@ async function sleepyHost() {
     },
     async wake() {
       current ??= await createTestPaseoDaemon({
+        ...options,
         listenPort: port,
         paseoHomeRoot: home,
         staticDir,
@@ -157,9 +162,28 @@ export default function contribute(server) {
 }
 
 /** A on the laptop side with the wake plugin, B registered, an agent on B, and B asleep. */
-async function fixture(options: { plugin?: boolean; hostWakeTimeoutMs?: number } = {}) {
-  const b = await sleepyHost();
-  const a = await createTestPaseoDaemon({ hostWakeTimeoutMs: options.hostWakeTimeoutMs });
+async function fixture(
+  options: {
+    plugin?: boolean;
+    hostWakeTimeoutMs?: number;
+    notifyOnFinish?: boolean;
+    hostAgents?: Parameters<typeof createTestAgentClients>[0];
+    parentPrompts?: string[];
+  } = {},
+) {
+  const b = await sleepyHost(
+    options.hostAgents ? { agentClients: createTestAgentClients(options.hostAgents) } : {},
+  );
+  const a = await createTestPaseoDaemon({
+    hostWakeTimeoutMs: options.hostWakeTimeoutMs,
+    ...(options.parentPrompts
+      ? {
+          agentClients: createTestAgentClients({
+            onStartTurn: (prompt) => options.parentPrompts!.push(JSON.stringify(prompt)),
+          }),
+        }
+      : {}),
+  });
   cleanup.push(() => a.close());
   const { paseo, client } = await api(a);
   const endpoint = await wakeEndpoint();
@@ -206,11 +230,11 @@ async function fixture(options: { plugin?: boolean; hostWakeTimeoutMs?: number }
     title: "Sleepy child",
     provider: "claude/claude-test",
     initialPrompt: "First task",
-    notifyOnFinish: false,
+    notifyOnFinish: options.notifyOnFinish ?? false,
   });
   expect(child.isError, JSON.stringify(child.body)).toBe(false);
   const agentId = String(child.body.agentId);
-  await (await api(b.daemon)).client.waitForFinish(agentId, 10000);
+  if (!options.hostAgents) await (await api(b.daemon)).client.waitForFinish(agentId, 10000);
   await b.sleep();
   await status(paseo, "offline");
   const send = (prompt: string) => call("send_agent_prompt", { serverId, agentId, prompt });
@@ -219,7 +243,7 @@ async function fixture(options: { plugin?: boolean; hostWakeTimeoutMs?: number }
     await direct.client.waitForFinish(agentId, 10000);
     return JSON.stringify(await direct.client.fetchAgentTimeline(agentId));
   };
-  return { a, b, paseo, client, endpoint, serverId, agentId, parent, call, send, activity };
+  return { a, b, paseo, client, endpoint, serverId, agentId, parent, call, send, activity, mcp };
 }
 
 test("without a plugin on the hook, a send to an offline host fails at once as before", async () => {
@@ -430,4 +454,65 @@ test("a hanging or throwing hook delays or fails only its own host's route", asy
     error: expect.stringContaining("Host hanging is asleep; waking it timed out"),
   });
   expect((await workspace("awake")).isError).toBe(false);
+}, 90_000);
+
+test("a finish observation of a child on a sleeping host retries without waking it", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  cleanup.push(async () => release());
+  const parentPrompts: string[] = [];
+  const { endpoint, agentId, paseo } = await fixture({
+    notifyOnFinish: true,
+    hostAgents: { beforeTurnComplete: () => held },
+    parentPrompts,
+  });
+  endpoint.handle(async () => {
+    throw new Error("an observation must not wake the host");
+  });
+  // The parent's finish subscription keeps observing the running child while its host sleeps,
+  // until it gives up on the unreachable host; none of its attempts reach the hook.
+  await expect
+    .poll(() => parentPrompts.join("\n"), { timeout: 60_000, interval: 500 })
+    .toContain("after three failed attempts");
+  expect(parentPrompts.join("\n")).toContain(agentId);
+  expect(endpoint.events).toEqual([]);
+  expect((await paseo.hosts.list()).hosts[0]?.status).not.toBe("online");
+}, 120_000);
+
+test("a host destroyed while still registered fails at once and says so", async () => {
+  const { send, serverId, endpoint } = await fixture();
+  endpoint.handle(async () => ({ result: { missing: true } }));
+  const started = Date.now();
+  expect(await send("GONE")).toMatchObject({
+    isError: true,
+    body: {
+      serverId,
+      code: "host_offline",
+      error: "Host Sleepy B no longer exists (destroyed); the message was not sent.",
+    },
+  });
+  expect(Date.now() - started).toBeLessThan(5000);
+}, 60_000);
+
+test("MCP progress during a wake keeps a client with a short timeout waiting", async () => {
+  const { b, mcp, serverId, agentId, endpoint } = await fixture();
+  endpoint.handle(async () => {
+    // Longer than the client's timeout below; progress every 10 s resets it.
+    await new Promise((resolve) => setTimeout(resolve, 14_000));
+    await b.wake();
+    return { result: undefined };
+  });
+  const progress: string[] = [];
+  const response = await mcp.callTool(
+    { name: "send_agent_prompt", arguments: { serverId, agentId, prompt: "SLOW_WAKE_PROGRESS" } },
+    undefined,
+    {
+      timeout: 12_000,
+      resetTimeoutOnProgress: true,
+      onprogress: (update) => progress.push(String(update.message)),
+    },
+  );
+  expect(response.isError, JSON.stringify(response.structuredContent)).not.toBe(true);
+  expect(progress.length).toBeGreaterThanOrEqual(1);
+  expect(progress[0]).toMatch(new RegExp(`^Waking host ${serverId}: \\d+ s so far$`));
 }, 90_000);
