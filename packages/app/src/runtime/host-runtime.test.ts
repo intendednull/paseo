@@ -2617,6 +2617,38 @@ describe("HostRuntimeController", () => {
     }
   });
 
+  it("says the wake timed out when the woken host doesn't come online", async () => {
+    useHostRuntimeClock();
+    const route: HostConnection = {
+      id: "via:srv_parent",
+      type: "routed",
+      originServerId: "srv_parent",
+    };
+    const host = makeHost({ connections: [route] });
+    const controller = new HostRuntimeController({
+      host,
+      deps: {
+        getClientId: async () => "wake-timeout",
+        createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+        connectToDaemon: async () => {
+          throw new Error("still asleep");
+        },
+        wakeVia: async () => {},
+      },
+    });
+    await controller.start({ autoProbe: false });
+    try {
+      const waking = controller.wake().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const error = await waking;
+      expect(String(error)).toMatch(
+        /is asleep; the wake timed out after 30 s; the message was not sent/,
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("does not wake a host that has no routed connection", async () => {
     const host = makeHost({
       connections: [{ id: "direct:lan:6767", type: "directTcp", endpoint: "lan:6767" }],

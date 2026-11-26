@@ -916,6 +916,10 @@ export class HostRuntimeController {
     });
     clearTimeout(timer);
     unsubscribe();
+    if (!isHostRuntimeConnected(this.snapshot))
+      throw new Error(
+        `Host ${this.host.label || this.host.serverId} is asleep; the wake timed out after ${HOST_WAKE_RECONNECT_TIMEOUT_MS / 1000} s; the message was not sent.`,
+      );
   }
 
   async reconnectVia(originServerId: string): Promise<void> {
