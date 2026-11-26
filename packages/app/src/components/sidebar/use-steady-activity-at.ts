@@ -7,7 +7,7 @@ import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list"
  * rows move under the pointer. Rows, status, additions and removals stay live; only the order
  * waits for the next tick.
  */
-export const STEADY_ORDER_TICK_MS = 2500;
+export const STEADY_ORDER_TICK_MS = 30_000;
 
 /** Each workspace's `activityAt`; returns `previous` when nothing changed, so memos hold. */
 export function snapshotActivityAt(
