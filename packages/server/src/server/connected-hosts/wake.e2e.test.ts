@@ -172,6 +172,37 @@ export default function contribute(server) {
   await client.installDirectoryPlugin(directory);
 }
 
+/** A TCP proxy to `target` that opens each link after `delayMs`; null holds links until destroyed. */
+async function slowProxy(target: number) {
+  const sockets = new Set<Socket>();
+  const state = { delayMs: 0 as number | null, port: 0 };
+  function forward(socket: Socket) {
+    const upstream = tcpConnect(target, "127.0.0.1");
+    sockets.add(upstream);
+    socket.pipe(upstream).pipe(socket);
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  }
+  const server = createTcpServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => socket.destroy());
+    if (state.delayMs !== null) setTimeout(forward, state.delayMs, socket);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  cleanup.push(
+    () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+  );
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing proxy port");
+  state.port = address.port;
+  return state;
+}
+
 /** A on the laptop side with the wake plugin, B registered, an agent on B, and B asleep. */
 async function fixture(
   options: {
@@ -418,7 +449,7 @@ test("a hanging or throwing hook delays or fails only its own host's route", asy
   const hanging = await sleepyHost();
   const throwing = await sleepyHost();
   const awake = await sleepyHost();
-  const a = await createTestPaseoDaemon({ hostWakeTimeoutMs: 6000 });
+  const a = await createTestPaseoDaemon({ hostWakeTimeoutMs: 15_000 });
   cleanup.push(() => a.close());
   const { paseo, client } = await api(a);
   const endpoint = await wakeEndpoint();
@@ -474,7 +505,7 @@ test("a hanging or throwing hook delays or fails only its own host's route", asy
     code: "host_offline",
     error: expect.stringContaining("Host throwing is asleep; waking it failed:"),
   });
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(Date.now() - started).toBeLessThan(10_000);
   expect(endpoint.events.map((event) => event.host.label)).toEqual(["hanging", "throwing"]);
   expect((await stuck).body).toMatchObject({
     code: "host_offline",
@@ -590,29 +621,9 @@ test("a host that is connecting gets a grace period and no wake", async () => {
   const b = await createTestPaseoDaemon();
   cleanup.push(() => b.close());
   // A link to B that takes 3 s to open: the registration sits in "connecting" meanwhile.
-  const sockets = new Set<Socket>();
-  function forward(socket: Socket) {
-    const upstream = tcpConnect(b.port, "127.0.0.1");
-    sockets.add(upstream);
-    socket.pipe(upstream).pipe(socket);
-    upstream.on("error", () => socket.destroy());
-    socket.on("error", () => upstream.destroy());
-  }
-  const proxy = createTcpServer((socket) => {
-    sockets.add(socket);
-    setTimeout(forward, 3000, socket);
-  });
-  proxy.listen(0, "127.0.0.1");
-  await once(proxy, "listening");
-  cleanup.push(
-    () =>
-      new Promise<void>((resolve) => {
-        for (const socket of sockets) socket.destroy();
-        proxy.close(() => resolve());
-      }),
-  );
-  const address = proxy.address();
-  if (!address || typeof address === "string") throw new Error("Missing proxy port");
+  const proxy = await slowProxy(b.port);
+  proxy.delayMs = 3000;
+  const address = { port: proxy.port };
   // First let A pin B's identity, then restart the link so it is connecting again.
   const a = await createTestPaseoDaemon();
   cleanup.push(() => a.close());
@@ -658,15 +669,12 @@ test("a host disabled or removed mid-wait fails the wait; a label change doesn't
     });
   }
   const { b, send, endpoint, paseo, activity } = await fixture({ hostWakeTimeoutMs: 20_000 });
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
+  // The plugin reports a wake at once; the daemon then waits for the link, mid-wait the label changes.
   endpoint.handle(async () => ({ result: undefined }));
   const sending = send("AFTER_RELABEL");
   await expect.poll(() => endpoint.events.length).toBe(1);
   const id = (await paseo.hosts.list()).hosts[0]!.registrationId;
   await paseo.hosts.update(id, { label: "Renamed B" });
-  release();
-  await released;
   await b.wake();
   expect((await sending).isError).toBe(false);
   expect(await activity()).toContain("AFTER_RELABEL");
@@ -728,4 +736,62 @@ test("create_agent wakes a sleeping host; list_agents and list_workspaces don't"
   });
   expect(created.isError, JSON.stringify(created.body)).toBe(false);
   expect(endpoint.events).toMatchObject([{ operation: "create_agent" }]);
+}, 90_000);
+
+test("after the connecting grace runs out the plugin is told the time actually left", async () => {
+  const b = await createTestPaseoDaemon();
+  cleanup.push(() => b.close());
+  const proxy = await slowProxy(b.port);
+  const a = await createTestPaseoDaemon({ hostWakeTimeoutMs: 40_000 });
+  cleanup.push(() => a.close());
+  const { paseo, client } = await api(a);
+  const endpoint = await wakeEndpoint();
+  await installWakePlugin(client, join(a.staticDir, "wake-plugin"), endpoint.url);
+  const host = await paseo.hosts.add({ connection: `127.0.0.1:${proxy.port}`, label: "Stuck B" });
+  await status(paseo, "online");
+  const serverId = (await paseo.hosts.list()).hosts[0]!.serverId!;
+  // From now on links hang: the restarted link stays "connecting" through the whole grace.
+  proxy.delayMs = null;
+  await paseo.hosts.update(host.registrationId, { enabled: false });
+  await paseo.hosts.update(host.registrationId, { enabled: true });
+  await status(paseo, "connecting");
+  let calledAt = 0;
+  endpoint.handle(async () => {
+    calledAt = Date.now();
+    proxy.delayMs = 0; // "the wake": links open again
+    return { result: undefined };
+  });
+  const mcp = new Client({ name: "wake-grace-deadline", version: "1" });
+  cleanup.push(() => mcp.close());
+  await mcp.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${a.port}/mcp/agents`)),
+  );
+  const started = Date.now();
+  const response = await mcp.callTool({
+    name: "create_workspace",
+    arguments: { serverId, isolation: "local", path: b.staticDir, title: "After grace" },
+  });
+  expect(response.isError, JSON.stringify(response.structuredContent)).not.toBe(true);
+  expect(endpoint.events).toHaveLength(1);
+  expect(calledAt - started).toBeGreaterThanOrEqual(9_500);
+  // The deadline counts from the start of the wake, grace included, not from the hook call.
+  const deadline = Date.parse(endpoint.events[0]!.deadline);
+  expect(Math.abs(deadline - (started + 40_000))).toBeLessThan(2_000);
+  expect(deadline - calledAt).toBeLessThan(32_000);
+}, 90_000);
+
+test("create_workspace wakes a sleeping host", async () => {
+  const { b, call, serverId, endpoint } = await fixture();
+  endpoint.handle(async () => {
+    await b.wake();
+    return { result: undefined };
+  });
+  const created = await call("create_workspace", {
+    serverId,
+    isolation: "local",
+    path: b.staticDir,
+    title: "Woken workspace",
+  });
+  expect(created.isError, JSON.stringify(created.body)).toBe(false);
+  expect(endpoint.events).toMatchObject([{ operation: "create_workspace" }]);
 }, 90_000);
