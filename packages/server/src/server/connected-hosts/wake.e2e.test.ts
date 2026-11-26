@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createTcpServer, connect as tcpConnect, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -31,11 +32,17 @@ interface WakeEvent {
 
 async function wakeEndpoint() {
   const events: WakeEvent[] = [];
+  const cancels: string[] = [];
   let onWake: (event: WakeEvent) => Promise<WakeReply> = async () => ({ skipped: true });
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     let body = "";
     request.on("data", (chunk) => (body += chunk));
     request.on("end", () => {
+      if (request.url?.endsWith("/cancelled")) {
+        cancels.push(body);
+        response.end("{}");
+        return;
+      }
       const event = JSON.parse(body) as WakeEvent;
       events.push(event);
       void onWake(event).then((reply) => {
@@ -60,6 +67,7 @@ async function wakeEndpoint() {
   return {
     url: `http://127.0.0.1:${address.port}/wake`,
     events,
+    cancels,
     handle(next: typeof onWake) {
       onWake = next;
     },
@@ -147,6 +155,9 @@ export default function contribute(server) {
   server.addHook("host.route.offline", async (event, { signal }) => {
     // The payload is a copy: changing it changes nothing in the daemon.
     const sent = JSON.stringify(event);
+    signal.addEventListener("abort", () => {
+      void fetch(${JSON.stringify(url)} + "/cancelled", { method: "POST", body: event.host.label ?? "" }).catch(() => {});
+    }, { once: true });
     event.host.serverId = "srv_redirected";
     const response = await fetch(${JSON.stringify(url)}, { method: "POST", body: sent, signal });
     const reply = await response.json();
@@ -243,7 +254,22 @@ async function fixture(
     await direct.client.waitForFinish(agentId, 10000);
     return JSON.stringify(await direct.client.fetchAgentTimeline(agentId));
   };
-  return { a, b, paseo, client, endpoint, serverId, agentId, parent, call, send, activity, mcp };
+  const workspaceId = String(destination.body.workspaceId);
+  return {
+    a,
+    b,
+    paseo,
+    client,
+    endpoint,
+    serverId,
+    agentId,
+    workspaceId,
+    parent,
+    call,
+    send,
+    activity,
+    mcp,
+  };
 }
 
 test("without a plugin on the hook, a send to an offline host fails at once as before", async () => {
@@ -297,10 +323,11 @@ test("a send to a sleeping host wakes it once, reconnects at once and delivers w
   expect(endpoint.events[0]).toMatchObject({
     host: { serverId, label: "Sleepy B", metadata: { "managed-by": "test" } },
     operation: "send_agent_prompt",
-    caller: { agentId: parent.id, labels: { role: "lead" } },
+    caller: { agentId: parent.id },
     deadline: expect.any(String),
   });
   expect(JSON.stringify(endpoint.events[0])).not.toContain("127.0.0.1");
+  expect(JSON.stringify(endpoint.events[0])).not.toContain("lead");
   const timeline = await activity();
   expect(timeline).toContain("WAKE_ONE");
   expect(timeline).toContain("WAKE_TWO");
@@ -515,4 +542,190 @@ test("MCP progress during a wake keeps a client with a short timeout waiting", a
   expect(response.isError, JSON.stringify(response.structuredContent)).not.toBe(true);
   expect(progress.length).toBeGreaterThanOrEqual(1);
   expect(progress[0]).toMatch(new RegExp(`^Waking host ${serverId}: \\d+ s so far$`));
+}, 90_000);
+
+test("a wake that hits the daemon's bound sends hook.cancel to the plugin", async () => {
+  const { send, endpoint } = await fixture({ hostWakeTimeoutMs: 1500 });
+  endpoint.handle(async () => "hang");
+  expect((await send("CANCEL_ON_TIMEOUT")).body).toMatchObject({
+    error: expect.stringContaining("waking it timed out"),
+  });
+  await expect.poll(() => endpoint.cancels).toEqual(["Sleepy B"]);
+}, 60_000);
+
+test("a send whose caller goes away stops waiting and is never delivered; the wake continues", async () => {
+  const { a, b, parent, serverId, agentId, endpoint, paseo, activity } = await fixture();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  endpoint.handle(async () => {
+    await released;
+    await b.wake();
+    return { result: undefined };
+  });
+  // The daemon sees a cancel when the call's HTTP request closes (an interrupted agent's client).
+  const caller = new Client({ name: "wake-cancel", version: "1" });
+  await caller.connect(
+    new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${a.port}/mcp/agents?callerAgentId=${parent.id}`),
+    ),
+  );
+  const cancelled = caller
+    .callTool({
+      name: "send_agent_prompt",
+      arguments: { serverId, agentId, prompt: "CANCELLED_SEND" },
+    })
+    .catch((error: unknown) => error);
+  await expect.poll(() => endpoint.events.length).toBe(1);
+  await caller.close();
+  expect(await cancelled).toBeInstanceOf(Error);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  release();
+  // The shared wake still brings the host online, but the cancelled prompt never goes out.
+  await status(paseo, "online");
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  expect(await activity()).not.toContain("CANCELLED_SEND");
+}, 90_000);
+
+test("a host that is connecting gets a grace period and no wake", async () => {
+  const b = await createTestPaseoDaemon();
+  cleanup.push(() => b.close());
+  // A link to B that takes 3 s to open: the registration sits in "connecting" meanwhile.
+  const sockets = new Set<Socket>();
+  function forward(socket: Socket) {
+    const upstream = tcpConnect(b.port, "127.0.0.1");
+    sockets.add(upstream);
+    socket.pipe(upstream).pipe(socket);
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  }
+  const proxy = createTcpServer((socket) => {
+    sockets.add(socket);
+    setTimeout(forward, 3000, socket);
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  cleanup.push(
+    () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        proxy.close(() => resolve());
+      }),
+  );
+  const address = proxy.address();
+  if (!address || typeof address === "string") throw new Error("Missing proxy port");
+  // First let A pin B's identity, then restart the link so it is connecting again.
+  const a = await createTestPaseoDaemon();
+  cleanup.push(() => a.close());
+  const { paseo, client } = await api(a);
+  const endpoint = await wakeEndpoint();
+  await installWakePlugin(client, join(a.staticDir, "wake-plugin"), endpoint.url);
+  endpoint.handle(async () => {
+    throw new Error("a connecting host must not be woken");
+  });
+  const host = await paseo.hosts.add({ connection: `127.0.0.1:${address.port}`, label: "Slow B" });
+  await status(paseo, "online");
+  const serverId = (await paseo.hosts.list()).hosts[0]!.serverId!;
+  await paseo.hosts.update(host.registrationId, { enabled: false });
+  await paseo.hosts.update(host.registrationId, { enabled: true });
+  await status(paseo, "connecting");
+  const mcp = new Client({ name: "wake-grace", version: "1" });
+  cleanup.push(() => mcp.close());
+  await mcp.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${a.port}/mcp/agents`)),
+  );
+  const response = await mcp.callTool({
+    name: "create_workspace",
+    arguments: { serverId, isolation: "local", path: b.staticDir, title: "Grace" },
+  });
+  expect(response.isError, JSON.stringify(response.structuredContent)).not.toBe(true);
+  expect(endpoint.events).toEqual([]);
+}, 60_000);
+
+test("a host disabled or removed mid-wait fails the wait; a label change doesn't", async () => {
+  for (const change of ["disabled", "removed"] as const) {
+    const { send, endpoint, paseo } = await fixture({ hostWakeTimeoutMs: 20_000 });
+    // The plugin reports a wake, but the host stays down: the daemon is left waiting.
+    endpoint.handle(async () => ({ result: undefined }));
+    const sending = send(`MID_WAIT_${change}`);
+    await expect.poll(() => endpoint.events.length).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const id = (await paseo.hosts.list()).hosts[0]!.registrationId;
+    if (change === "disabled") await paseo.hosts.update(id, { enabled: false });
+    else await paseo.hosts.remove(id);
+    expect((await sending).body).toMatchObject({
+      code: "host_offline",
+      error: `Host Sleepy B is asleep; waking it failed: the host was ${change}; the message was not sent.`,
+    });
+  }
+  const { b, send, endpoint, paseo, activity } = await fixture({ hostWakeTimeoutMs: 20_000 });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  endpoint.handle(async () => ({ result: undefined }));
+  const sending = send("AFTER_RELABEL");
+  await expect.poll(() => endpoint.events.length).toBe(1);
+  const id = (await paseo.hosts.list()).hosts[0]!.registrationId;
+  await paseo.hosts.update(id, { label: "Renamed B" });
+  release();
+  await released;
+  await b.wake();
+  expect((await sending).isError).toBe(false);
+  expect(await activity()).toContain("AFTER_RELABEL");
+}, 120_000);
+
+test("an aborted session route stops waiting", async () => {
+  const { a, serverId, endpoint } = await fixture();
+  endpoint.handle(async () => "hang");
+  const origin = createHostClient(`127.0.0.1:${a.port}`, {
+    clientId: crypto.randomUUID(),
+    reconnect: { enabled: false },
+  });
+  await origin.connect();
+  cleanup.push(() => origin.close());
+  const person = createPaseoApi(origin);
+  const opening = person.hosts.client(serverId, { wake: true }).catch((error: unknown) => error);
+  await expect.poll(() => endpoint.events.length).toBe(1);
+  await person.dispose();
+  expect(await opening).toBeInstanceOf(Error);
+}, 60_000);
+
+test("an MCP send and a session route to one sleeping host share one wake", async () => {
+  const { b, send, serverId, endpoint, paseo, activity } = await fixture();
+  endpoint.handle(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await b.wake();
+    return { result: undefined };
+  });
+  const [sent, remote] = await Promise.all([
+    send("SHARED_WAKE"),
+    paseo.hosts.client(serverId, { wake: true }),
+  ]);
+  cleanup.push(() => remote.dispose());
+  expect(sent.isError, JSON.stringify(sent.body)).toBe(false);
+  expect(endpoint.events).toHaveLength(1);
+  expect(await activity()).toContain("SHARED_WAKE");
+}, 90_000);
+
+test("create_agent wakes a sleeping host; list_agents and list_workspaces don't", async () => {
+  const { b, call, serverId, workspaceId, endpoint } = await fixture();
+  endpoint.handle(async () => {
+    await b.wake();
+    return { result: undefined };
+  });
+  for (const read of ["list_agents", "list_workspaces"]) {
+    expect(await call(read, { serverId })).toMatchObject({
+      isError: true,
+      body: { code: "host_offline", error: OFFLINE_MESSAGE },
+    });
+  }
+  expect(endpoint.events).toEqual([]);
+  const created = await call("create_agent", {
+    serverId,
+    workspaceId,
+    title: "Woken child",
+    provider: "claude/claude-test",
+    initialPrompt: "Woken task",
+    notifyOnFinish: false,
+  });
+  expect(created.isError, JSON.stringify(created.body)).toBe(false);
+  expect(endpoint.events).toMatchObject([{ operation: "create_agent" }]);
 }, 90_000);
