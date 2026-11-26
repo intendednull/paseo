@@ -1,6 +1,12 @@
 import type { AgentSessionConfig, McpServerConfig } from "./agent-sdk-types.js";
 
 export const PASEO_MCP_SERVER_NAME = "paseo";
+/**
+ * Tool-call timeout for the daemon's own MCP server where the provider sets one per server (Codex's
+ * default is 60 s). A call to a sleeping connected host waits for its wake, up to
+ * daemon.connectedHosts.wakeTimeoutSeconds (at most 240 s).
+ */
+export const PASEO_MCP_TOOL_TIMEOUT_SECONDS = 300;
 const PASEO_MCP_PATHNAME = "/mcp/agents";
 
 export function stripInternalPaseoMcpServer(config: AgentSessionConfig): AgentSessionConfig {
@@ -57,7 +63,7 @@ export function withRuntimePaseoMcpServer(params: {
   };
 }
 
-function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
+export function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
   if (config.type !== "http" && config.type !== "sse") {
     return false;
   }

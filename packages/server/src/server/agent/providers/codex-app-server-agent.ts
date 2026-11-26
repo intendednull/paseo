@@ -136,6 +136,11 @@ import {
   resolveExecutablePath,
   type LatestReleaseLookup,
 } from "./release-check.js";
+import {
+  PASEO_MCP_SERVER_NAME,
+  PASEO_MCP_TOOL_TIMEOUT_SECONDS,
+  isInternalPaseoMcpServer,
+} from "../runtime-mcp-config.js";
 import { runUpdateCommand, updatedForNewAgents } from "./update-command.js";
 import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "./provider-runner.js";
 import {
@@ -6567,6 +6572,8 @@ export class CodexAppServerAgentSession implements AgentSession {
       const mcpServers: Record<string, CodexMcpServerConfig> = {};
       for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
         mcpServers[name] = toCodexMcpConfig(serverConfig);
+        if (name === PASEO_MCP_SERVER_NAME && isInternalPaseoMcpServer(serverConfig))
+          mcpServers[name].tool_timeout_sec = PASEO_MCP_TOOL_TIMEOUT_SECONDS;
       }
       innerConfig.mcp_servers = mcpServers;
     }
