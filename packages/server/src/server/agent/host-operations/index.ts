@@ -84,6 +84,21 @@ export interface ToolHosts {
   ): Promise<T>;
 }
 
+function withSignal(hosts: ToolHosts, signal: AbortSignal | undefined): ToolHosts {
+  if (!signal) return hosts;
+  return { ...hosts, use: (serverId, action) => hosts.use(serverId, action, signal) };
+}
+
+function cancelled(serverId: string, when: string): HostOperationRejectedError {
+  return new HostOperationRejectedError(
+    new HostError(
+      "host_offline",
+      `The request was cancelled ${when}; the message was not sent.`,
+      serverId,
+    ),
+  );
+}
+
 /** A work operation's request to wake a sleeping host first. */
 export interface HostWake {
   intent: HostWakeIntent;
@@ -101,14 +116,7 @@ export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
       await hosts.awaitOnline(serverId, intent, signal, waiting).catch((error: unknown) => {
         throw new HostOperationRejectedError(error);
       });
-      if (signal?.aborted)
-        throw new HostOperationRejectedError(
-          new HostError(
-            "host_offline",
-            "The request was cancelled while the host was waking; the message was not sent.",
-            serverId,
-          ),
-        );
+      if (signal?.aborted) throw cancelled(serverId, "while the host was waking");
     },
     async use(serverId, action, signal) {
       const lifetime = new AbortController();
@@ -184,11 +192,14 @@ export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
       const stop = () => void client.close();
       signal?.addEventListener("abort", stop, { once: true });
       try {
-        signal?.throwIfAborted();
+        // Until the action sends, a cancel means nothing was sent.
+        if (signal?.aborted) throw cancelled(serverId, "before the host route opened");
         await client.connect().catch((error) => {
           // The action has not run; no application request could have been transmitted.
+          if (signal?.aborted) throw cancelled(serverId, "while the host route opened");
           throw new HostOperationRejectedError(routeFailure ?? error);
         });
+        if (signal?.aborted) throw cancelled(serverId, "while the host route opened");
         return await action(client);
       } finally {
         signal?.removeEventListener("abort", stop);
@@ -244,7 +255,9 @@ export function createHostResolver(input: {
       if (input.lockedCwd)
         throw new Error("This caller is restricted to its local working directory");
       if (wake) await input.hosts().wake(destination, wake);
-      return input.hosts().use(destination, async (client) =>
+      // The caller's cancel stays honoured until the operation sends.
+      const routed = withSignal(input.hosts(), wake?.signal);
+      return routed.use(destination, async (client) =>
         action({
           async createAgent(args) {
             const parsed = remoteCreate.parse(args);

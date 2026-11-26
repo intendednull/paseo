@@ -1,7 +1,14 @@
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { afterEach, expect, test } from "vitest";
 
-import { createHostResolver, type HostOperations } from "./index.js";
+import type { ConnectedHosts } from "../../connected-hosts/index.js";
+import {
+  createHostResolver,
+  createToolHosts,
+  HostOperationRejectedError,
+  type HostOperations,
+  type ToolHosts,
+} from "./index.js";
 
 type Handler = ((event?: unknown) => void) | null;
 
@@ -232,4 +239,77 @@ test("a remote worktree that branches off a pull request is refused, as on the l
     ),
   ).rejects.toThrow("branch, prNumber, and forge require a checkout mode");
   expect(socket.requests.map((request) => request.type)).not.toContain("workspace.create.request");
+});
+
+const wakeIntent = { operation: "send_agent_prompt" as const, caller: null };
+
+test("a cancel after the wake but before the route opens is honoured: nothing is sent", async () => {
+  const controller = new AbortController();
+  let usedSignal: AbortSignal | undefined;
+  let actionRan = false;
+  const realHosts = createToolHosts({
+    awaitOnline: async () => {},
+    openRoute: () => new Promise(() => {}),
+  } as unknown as ConnectedHosts);
+  const resolver = createHostResolver({
+    serverId: "origin",
+    caller: () => null,
+    local: {} as HostOperations,
+    hosts: (): ToolHosts => ({
+      directory: realHosts.directory,
+      // The wake succeeds, and the caller cancels just after it.
+      wake: async (serverId, wake) => {
+        await realHosts.wake(serverId, wake);
+        controller.abort();
+      },
+      use: (serverId, action, signal) => {
+        usedSignal = signal;
+        return realHosts.use(serverId, action, signal);
+      },
+    }),
+  });
+  const failure = await resolver
+    .use(
+      "remote",
+      async () => {
+        actionRan = true;
+        return "sent";
+      },
+      { intent: wakeIntent, signal: controller.signal },
+    )
+    .catch((error: unknown) => error);
+  expect(usedSignal).toBe(controller.signal);
+  expect(actionRan).toBe(false);
+  expect(failure).toBeInstanceOf(HostOperationRejectedError);
+  expect(failure).toMatchObject({ code: "host_offline" });
+  expect(String((failure as Error).message)).toMatch(/cancelled .*the message was not sent/);
+});
+
+test("a cancel while the route handshake is pending fails the operation as not sent", async () => {
+  const controller = new AbortController();
+  let opened = 0;
+  const hosts = createToolHosts({
+    awaitOnline: async () => {},
+    openRoute: () => {
+      opened += 1;
+      queueMicrotask(() => controller.abort());
+      return new Promise(() => {});
+    },
+  } as unknown as ConnectedHosts);
+  let actionRan = false;
+  const failure = await hosts
+    .use(
+      "remote",
+      async () => {
+        actionRan = true;
+      },
+      controller.signal,
+    )
+    .catch((error: unknown) => error);
+  expect(opened).toBe(1);
+  expect(actionRan).toBe(false);
+  expect(failure).toMatchObject({ code: "host_offline" });
+  expect(String((failure as Error).message)).toContain(
+    "cancelled while the host route opened; the message was not sent",
+  );
 });

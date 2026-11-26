@@ -485,6 +485,8 @@ export class ConnectedHosts {
       );
     const timedOut = () =>
       asleep(`waking it timed out: not online within ${Math.round(timeoutMs / 1000)} s`);
+    // One bound for the whole wake, grace included: the plugin is told what is actually left.
+    const deadlineAt = Date.now() + timeoutMs;
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(), timeoutMs);
     timer.unref();
@@ -525,9 +527,9 @@ export class ConnectedHosts {
             },
             operation: intent.operation,
             caller: intent.caller ? { agentId: intent.caller.agentId } : null,
-            deadline: new Date(Date.now() + timeoutMs).toISOString(),
+            deadline: new Date(deadlineAt).toISOString(),
           },
-          { signal, timeoutMs },
+          { signal, timeoutMs: Math.max(1, deadlineAt - Date.now()) },
         );
       } catch (error) {
         throw failed(error);
