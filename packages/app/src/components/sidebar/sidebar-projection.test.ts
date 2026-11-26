@@ -237,7 +237,7 @@ function dateInput(workspaceSort: "activity" | "created" | "manual") {
     workspaceEntriesByKey: new Map(entries.map((e) => [e.workspaceKey, e])),
   };
 }
-const sections = (input: ReturnType<typeof dateInput>) =>
+const sections = (input: Parameters<typeof buildSidebarProjection>[0]) =>
   buildSidebarProjection(input).workspaceGroups.map((group) => [
     group.label,
     group.rows.map((row) => row.workspaceId),
@@ -259,6 +259,31 @@ describe("buildSidebarProjection date grouping", () => {
     expect(sections(dateInput("manual"))).toEqual([
       ["Last 7 days", ["a-recent", "b-recent"]],
       ["Older than 7 days", ["a-old", "b-old"]],
+    ]);
+  });
+
+  it("orders and cuts by the steady activity snapshot, falling back to live activity", () => {
+    const input = dateInput("activity");
+    const live = [...input.workspaceEntriesByKey.values()];
+    const byId = (id: string) => live.find((entry) => entry.workspaceId === id)!;
+    // b-recent just had activity; the snapshot from the last tick has it behind a-recent.
+    byId("b-recent").activityAt = NOW;
+    const orderActivityAt = new Map(
+      [byId("a-recent"), byId("b-old"), byId("a-old")].map((entry) => [
+        entry.workspaceKey,
+        entry.activityAt ?? 0,
+      ]),
+    );
+    orderActivityAt.set(byId("b-recent").workspaceKey, NOW - 2 * DAY);
+    expect(sections({ ...input, orderActivityAt })).toEqual([
+      ["Last 7 days", ["a-recent", "b-recent"]],
+      ["Older than 7 days", ["b-old", "a-old"]],
+    ]);
+    // A workspace the snapshot hasn't seen yet sorts by its live activity.
+    orderActivityAt.delete(byId("b-recent").workspaceKey);
+    expect(sections({ ...input, orderActivityAt })).toEqual([
+      ["Last 7 days", ["b-recent", "a-recent"]],
+      ["Older than 7 days", ["b-old", "a-old"]],
     ]);
   });
 

@@ -45,6 +45,12 @@ export interface SidebarProjectionInput {
   projectNamesByViewKey: Map<string, string>;
   groupMode: SidebarGroupMode;
   workspaceSort?: WorkspaceSort;
+  /**
+   * The `activityAt` each workspace is ordered and date-grouped by, refreshed on a timer so busy
+   * workspaces don't swap places on every update (`useSteadyActivityAt`). A workspace missing from
+   * it uses its live `activityAt`. Rows still render the live entry.
+   */
+  orderActivityAt?: ReadonlyMap<string, number>;
   /** Ms; the clock the "date" grouping cuts against (defaults to Date.now()). */
   now?: number;
   pinnedCollapsed: boolean;
@@ -112,7 +118,10 @@ function buildWorkspaceGroups(
       const groups = buildStatusGroups(unpinnedWorkspaces, input.projectNamesByViewKey, input.t);
       if (input.workspaceSort === "activity") {
         // buildStatusGroups returns fresh row arrays, so sorting them in place is safe.
-        for (const group of groups) group.rows.sort(byNewestActivity);
+        const activityOf = orderingActivity(input);
+        for (const group of groups) {
+          group.rows.sort((left, right) => activityOf(right) - activityOf(left));
+        }
       }
       return statusWorkspaceGroups(groups);
     }
@@ -133,6 +142,7 @@ function dateWorkspaceGroups(
   unpinnedWorkspaces: SidebarWorkspaceEntry[],
 ): SidebarWorkspaceGroup[] {
   const cutoff = (input.now ?? Date.now()) - RECENT_WINDOW_MS;
+  const activityOf = orderingActivity(input);
   const rows = orderAcrossProjects(input, unpinnedWorkspaces);
   const sections = [
     { recent: true, key: "date:recent", label: input.t("sidebar.display.grouping.lastSevenDays") },
@@ -146,7 +156,7 @@ function dateWorkspaceGroups(
     .map((section) => ({
       key: section.key,
       label: section.label,
-      rows: rows.filter((row) => (row.activityAt ?? 0) >= cutoff === section.recent),
+      rows: rows.filter((row) => activityOf(row) >= cutoff === section.recent),
       leading: { kind: "date" as const, recent: section.recent },
     }))
     .filter((group) => group.rows.length > 0);
@@ -162,7 +172,7 @@ function orderAcrossProjects(
   }
   const byProjectOrder = (left: SidebarWorkspaceEntry, right: SidebarWorkspaceEntry) =>
     (position.get(left.workspaceKey) ?? Infinity) - (position.get(right.workspaceKey) ?? Infinity);
-  const key = sortKey(input.workspaceSort);
+  const key = sortKey(input.workspaceSort, orderingActivity(input));
   return [...workspaces].sort(
     (left, right) => (key ? key(right) - key(left) : 0) || byProjectOrder(left, right),
   );
@@ -170,10 +180,11 @@ function orderAcrossProjects(
 
 function sortKey(
   sort: WorkspaceSort | undefined,
+  activityOf: (entry: SidebarWorkspaceEntry) => number,
 ): ((entry: SidebarWorkspaceEntry) => number) | null {
   switch (sort) {
     case "activity":
-      return (entry) => entry.activityAt ?? 0;
+      return activityOf;
     case "created":
       return (entry) => entry.createdAtMs ?? 0;
     case "lastPrompt":
@@ -184,14 +195,17 @@ function sortKey(
   }
 }
 
-function byNewestActivity(left: SidebarWorkspaceEntry, right: SidebarWorkspaceEntry): number {
-  return (right.activityAt ?? 0) - (left.activityAt ?? 0);
+function orderingActivity(input: SidebarProjectionInput): (entry: SidebarWorkspaceEntry) => number {
+  return (entry) => input.orderActivityAt?.get(entry.workspaceKey) ?? entry.activityAt ?? 0;
 }
 
 /** Orders each project's workspaces newest activity first; project and pinned order stay. */
 function sortProjectsByActivity(input: SidebarProjectionInput): SidebarProjectionInput {
-  const activityAt = (workspaceKey: string) =>
-    input.workspaceEntriesByKey.get(workspaceKey)?.activityAt ?? 0;
+  const activityOf = orderingActivity(input);
+  const activityAt = (workspaceKey: string) => {
+    const entry = input.workspaceEntriesByKey.get(workspaceKey);
+    return entry ? activityOf(entry) : 0;
+  };
   return {
     ...input,
     projects: input.projects.map((project) => ({

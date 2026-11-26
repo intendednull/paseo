@@ -24,6 +24,7 @@ import {
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
 import { buildSidebarProjection } from "./sidebar-projection";
+import { useSteadyActivityAt } from "./use-steady-activity-at";
 import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
 import { filterWorkspacesByLabels, type SidebarWorkspaceGroup } from "./sidebar-labels";
 import { filterWorkspacesByProjects, resolveActiveProjectFilters } from "./sidebar-project-filter";
@@ -142,6 +143,11 @@ export function SidebarModelProvider({
     });
     return new Map(filtered.map((workspace) => [workspace.workspaceKey, workspace]));
   }, [showBackground, labelFilter, resolvedProjectFilters, workspaceEntriesByKey]);
+  // Activity orders rows under the "activity" sort and cuts the "date" sections.
+  const orderActivityAt = useSteadyActivityAt(
+    filteredWorkspaceEntriesByKey,
+    workspaceSort === "activity" || groupMode === "date",
+  );
   const visibleWorkspaceKeys = useMemo(
     () => new Set(filteredWorkspaceEntriesByKey.keys()),
     [filteredWorkspaceEntriesByKey],
@@ -185,6 +191,7 @@ export function SidebarModelProvider({
       projectNamesByViewKey: list.projectNamesByViewKey,
       groupMode,
       workspaceSort,
+      orderActivityAt,
       now,
       pinnedCollapsed,
       collapsedProjectKeys,
@@ -193,6 +200,7 @@ export function SidebarModelProvider({
     }),
     [
       workspaceSort,
+      orderActivityAt,
       now,
       collapsedProjectKeys,
       collapsedWorkspaceGroupKeys,
