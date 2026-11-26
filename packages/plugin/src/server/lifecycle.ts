@@ -44,8 +44,11 @@ export type PluginHostRouteOperation =
 export interface PluginHostRouteOfflineEvent {
   host: PluginHookHost;
   operation: PluginHostRouteOperation;
-  /** The daemon agent behind an MCP host operation; `null` for a person's session route. */
-  caller: { agentId: string; labels: Readonly<Record<string, string>> } | null;
+  /**
+   * The daemon agent behind an MCP host operation; `null` for a person's session route. Concurrent
+   * routes to one host share one call, which carries the first route's operation and caller.
+   */
+  caller: { agentId: string } | null;
   /** When the daemon stops waiting for the host (ISO 8601). */
   deadline: string;
 }

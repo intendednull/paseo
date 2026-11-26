@@ -12,6 +12,7 @@ import {
 import type { DaemonTransportFactory } from "@getpaseo/client/internal/daemon-client-transport-types";
 import type { HostDirectory } from "@getpaseo/protocol/hosts";
 import { OWNER_PERMISSIONS } from "../../authorization/index.js";
+import { HostError } from "../../connected-hosts/index.js";
 import type { ConnectedHosts, HostWakeIntent } from "../../connected-hosts/index.js";
 import { resolveRequiredProviderModel } from "../mcp-shared.js";
 import { selectAgentListItems } from "../agent-projections.js";
@@ -75,11 +76,7 @@ export interface HostObservation {
 export interface ToolHosts {
   directory(): Promise<HostDirectory>;
   /** Before an operation that carries work: wakes a sleeping host, or rejects as not sent. */
-  wake(
-    serverId: string,
-    intent: HostWakeIntent,
-    waiting?: (elapsedMs: number) => void,
-  ): Promise<void>;
+  wake(serverId: string, wake: HostWake): Promise<void>;
   use<T>(
     serverId: string,
     action: (client: DaemonClient) => Promise<T>,
@@ -87,15 +84,31 @@ export interface ToolHosts {
   ): Promise<T>;
 }
 
+/** A work operation's request to wake a sleeping host first. */
+export interface HostWake {
+  intent: HostWakeIntent;
+  /** The tool call's own signal: a cancelled call stops waiting and is never sent. */
+  signal?: AbortSignal;
+  waiting?: (elapsedMs: number) => void;
+}
+
 /** Daemon MCP has the daemon's authority, bounded by the destination's admission of its link. */
 export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
   return {
     directory: () => hosts.list(),
-    async wake(serverId, intent, waiting) {
+    async wake(serverId, { intent, signal, waiting }) {
       // Before the route client exists, so its connect timeout doesn't run during the wake.
-      await hosts.awaitOnline(serverId, intent, undefined, waiting).catch((error: unknown) => {
+      await hosts.awaitOnline(serverId, intent, signal, waiting).catch((error: unknown) => {
         throw new HostOperationRejectedError(error);
       });
+      if (signal?.aborted)
+        throw new HostOperationRejectedError(
+          new HostError(
+            "host_offline",
+            "The request was cancelled while the host was waking; the message was not sent.",
+            serverId,
+          ),
+        );
     },
     async use(serverId, action, signal) {
       const lifetime = new AbortController();
@@ -224,14 +237,13 @@ export function createHostResolver(input: {
     async use<T>(
       serverId: string | undefined,
       action: (host: HostOperations) => Promise<T>,
-      wake?: HostWakeIntent,
-      waiting?: (elapsedMs: number) => void,
+      wake?: HostWake,
     ): Promise<T> {
       const destination = serverId ?? input.serverId;
       if (destination === input.serverId) return action(input.local);
       if (input.lockedCwd)
         throw new Error("This caller is restricted to its local working directory");
-      if (wake) await input.hosts().wake(destination, wake, waiting);
+      if (wake) await input.hosts().wake(destination, wake);
       return input.hosts().use(destination, async (client) =>
         action({
           async createAgent(args) {

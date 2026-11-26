@@ -745,7 +745,7 @@ function createToolCatalog(
     const caller = callerAgentId ? agentManager.getAgent(callerAgentId) : null;
     return {
       operation: name as HostWakeIntent["operation"],
-      caller: caller ? { agentId: caller.id, labels: { ...caller.labels } } : null,
+      caller: caller ? { agentId: caller.id } : null,
     };
   }
   const hostResolver = createHostResolver({
@@ -803,11 +803,16 @@ function createToolCatalog(
           const response = await hostResolver.use(
             serverId,
             (host) => host[operation](input, context),
-            hostWakeOperations.has(name) ? hostWakeIntent(name) : undefined,
-            (elapsedMs) =>
-              context.progress?.(
-                `Waking host ${destination}: ${Math.round(elapsedMs / 1000)} s so far`,
-              ),
+            hostWakeOperations.has(name)
+              ? {
+                  intent: hostWakeIntent(name),
+                  signal: context.signal,
+                  waiting: (elapsedMs) =>
+                    context.progress?.(
+                      `Waking host ${destination}: ${Math.round(elapsedMs / 1000)} s so far`,
+                    ),
+                }
+              : undefined,
           );
           if (response.isError) await remoteNotification?.reject();
           else remoteNotification?.accept();
