@@ -35,31 +35,35 @@ queue sits on. Every commit carries `Upstream-Status:`
 
 The commit trailers are authoritative; this is the summary.
 
-| commit                                                   | drop when                                                  |
-| -------------------------------------------------------- | ---------------------------------------------------------- |
-| fix(voice): honour the requested cwd                     | upstream honours or rejects explicit cwds under voice      |
-| fix(stt): reset the OpenAI STT buffer on commit          | upstream resets the buffer before awaiting                 |
-| fix(voice): keep a pending turn                          | upstream stops dropping in-flight turns on speech start    |
-| fix(voice): interrupt only once the transcript has words | upstream gates barge-in on words                           |
-| feat(app): "Recent activity" sidebar sort                | upstream ships an activity sort                            |
-| fix(desktop): React DevTools only when asked             | upstream's Nix desktop runs packaged, or gates DevTools    |
-| fix(nix): apply the patch-package backports              | upstream's Nix packages apply patches/                     |
-| feat(app): "Date" sidebar grouping                       | upstream ships a date or ungrouped sidebar mode            |
-| fix(nix): refresh npm-deps.hash for <tag>                | the tag's npm-deps.hash matches its package-lock.json      |
-| feat(server): add compact_agent MCP tool                 | upstream ships a remote compaction MCP tool (#8708)        |
-| feat(server): auto-compact idle agents before cache TTL  | upstream ships per-provider idle auto-compaction           |
-| fix(server): forward supportsCompaction in wrapper       | upstream forwards supportsCompaction in provider wrap      |
-| fix(server): harden ACP safety and compaction plumbing   | upstream forwards compaction flags and ACP safety checks   |
-| feat(server): support compact_agent for Codex & OpenCode | upstream ships multi-provider compact_agent (#8708)        |
-| feat(server): allow manual compact_agent with children   | upstream allows manual compaction with live children       |
-| feat(server): raise idle auto-compaction minimum to 400k | upstream ships per-provider idle auto-compaction           |
-| feat(app): stream large session file downloads to disk   | upstream streams session downloads directly to disk        |
-| feat(server): send focus instructions on idle compaction | upstream supports focus instructions for idle compaction   |
-| fix(server): an agent's steer never stops a running turn | upstream stops replacing turns that decline an agent steer |
-| fix(server): keep MCP headers off Claude Code's argv     | upstream passes Claude MCP config off the command line     |
-| feat(plugin): add the host.route.offline hook            | upstream ships a host-offline/wake hook                    |
-| feat(server): wake a sleeping connected host for work    | upstream wakes offline connected hosts before routing work |
-| feat(app): wake a sleeping routed host when sending      | upstream's app wakes offline routed hosts before sending   |
+| commit                                                                 | drop when                                                  |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------- |
+| fix(voice): honour the requested cwd                                   | upstream honours or rejects explicit cwds under voice      |
+| fix(stt): reset the OpenAI STT buffer on commit                        | upstream resets the buffer before awaiting                 |
+| fix(voice): keep a pending turn                                        | upstream stops dropping in-flight turns on speech start    |
+| fix(voice): interrupt only once the transcript has words               | upstream gates barge-in on words                           |
+| feat(app): "Recent activity" sidebar sort                              | upstream ships an activity sort                            |
+| fix(desktop): React DevTools only when asked                           | upstream's Nix desktop runs packaged, or gates DevTools    |
+| fix(nix): apply the patch-package backports                            | upstream's Nix packages apply patches/                     |
+| feat(app): "Date" sidebar grouping                                     | upstream ships a date or ungrouped sidebar mode            |
+| fix(nix): refresh npm-deps.hash for <tag>                              | the tag's npm-deps.hash matches its package-lock.json      |
+| feat(server): add compact_agent MCP tool                               | upstream ships a remote compaction MCP tool (#8708)        |
+| feat(server): auto-compact idle agents before cache TTL                | upstream ships per-provider idle auto-compaction           |
+| fix(server): forward supportsCompaction in wrapper                     | upstream forwards supportsCompaction in provider wrap      |
+| fix(server): harden ACP safety and compaction plumbing                 | upstream forwards compaction flags and ACP safety checks   |
+| feat(server): support compact_agent for Codex & OpenCode               | upstream ships multi-provider compact_agent (#8708)        |
+| feat(server): allow manual compact_agent with children                 | upstream allows manual compaction with live children       |
+| feat(server): raise idle auto-compaction minimum to 400k               | upstream ships per-provider idle auto-compaction           |
+| feat(app): stream large session file downloads to disk                 | upstream streams session downloads directly to disk        |
+| feat(server): send focus instructions on idle compaction               | upstream supports focus instructions for idle compaction   |
+| fix(server): an agent's steer never stops a running turn               | upstream stops replacing turns that decline an agent steer |
+| fix(server): keep MCP headers off Claude Code's argv                   | upstream passes Claude MCP config off the command line     |
+| feat(plugin): add the host.route.offline hook                          | upstream ships a host-offline/wake hook                    |
+| feat(server): wake a sleeping connected host for work                  | upstream wakes offline connected hosts before routing work |
+| feat(app): wake a sleeping routed host when sending                    | upstream's app wakes offline routed hosts before sending   |
+| fix(server): give Codex's daemon MCP server a wake-length tool timeout | upstream wakes offline connected hosts before routing work |
+| feat(server): say when a woken host is gone; keep MCP callers waiting  | upstream wakes offline connected hosts before routing work |
+| fix(server): cancel, grace and lookup fixes for host wakes             | upstream wakes offline connected hosts before routing work |
+| fix(app): say so when a woken routed host doesn't come online          | upstream's app wakes offline routed hosts before sending   |
 
 ## Branches
 
