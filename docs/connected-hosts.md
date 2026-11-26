@@ -85,7 +85,11 @@ A route to an offline host fails at once with `host_offline`, unless a plugin re
 message to a routed host that is offline). The registry then offers the host to the plugin, resets
 its link so the backoff doesn't delay the reconnect, and waits up to
 `daemon.connectedHosts.wakeTimeoutSeconds` (default 90) for it to come online. One wake runs per host
-at a time. Status reads never wake a host, so a polling client doesn't keep one awake. See the
+at a time. Status reads and finish observations never wake a host, so polling doesn't keep one
+awake. The bound stays at most 240 s because an agent's MCP client gives up on a tool call after
+300 s (Claude Code's HTTP default; Codex gets `tool_timeout_sec = 300` for the daemon's own server).
+Clients that send a progress token receive progress every 10 s while they wait, which keeps clients
+that reset their timeout on progress (the MCP SDK's 60 s default, OpenCode) waiting. See the
 [hook](../public-docs/plugins/hooks.md#hostrouteoffline).
 
 Disposing a routed API releases its observations and session. It does not remove the saved host or

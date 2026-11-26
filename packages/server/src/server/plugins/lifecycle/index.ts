@@ -374,6 +374,7 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
             paseo,
             signal: controller.signal,
           });
+          if (isMissing(result)) return { skipped: false, missing: true };
           if (!isSkipped(result)) return { skipped: false };
         }
         return { skipped: true };
@@ -457,6 +458,14 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
       this.changed();
     };
   }
+}
+
+function isMissing(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { missing?: unknown }).missing === true
+  );
 }
 
 function isSkipped(result: unknown): boolean {

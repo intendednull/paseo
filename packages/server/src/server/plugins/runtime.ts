@@ -759,7 +759,7 @@ export class PluginRuntime {
   async hostRouteOffline(
     payload: PluginHostRouteOfflineEvent,
     options: { signal: AbortSignal; timeoutMs: number },
-  ): Promise<"woken" | "skipped"> {
+  ): Promise<"woken" | "skipped" | "missing"> {
     const name = "host.route.offline";
     const plugins = [...this.plugins.values()].sort((left, right) =>
       left.id.localeCompare(right.id),
@@ -778,11 +778,9 @@ export class PluginRuntime {
           cause: error,
         });
       }
-      const skipped =
-        typeof output === "object" &&
-        output !== null &&
-        (output as { skipped?: unknown }).skipped === true;
-      if (!skipped) return "woken";
+      const flags = typeof output === "object" && output !== null ? output : {};
+      if ((flags as { missing?: unknown }).missing === true) return "missing";
+      if ((flags as { skipped?: unknown }).skipped !== true) return "woken";
     }
     return "skipped";
   }

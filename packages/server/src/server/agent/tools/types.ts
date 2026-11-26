@@ -16,6 +16,8 @@ export class PaseoToolInputError extends Error {
 export interface PaseoToolExecutionContext {
   signal?: AbortSignal;
   sendUpdate?: (update: PaseoToolResult) => void;
+  /** Tells the caller a long call is still running (MCP progress), so its client keeps waiting. */
+  progress?: (message: string) => void;
 }
 
 export interface PaseoToolResult {

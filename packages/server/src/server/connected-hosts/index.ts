@@ -72,12 +72,17 @@ export interface HostWakeEvent extends HostWakeIntent {
   };
   deadline: string;
 }
-/** Wakes a sleeping host, or answers "skipped" when it doesn't manage it. */
+/**
+ * Wakes a sleeping host. "skipped": not managed by the handler; "missing": the host was destroyed
+ * while still registered.
+ */
 export type HostWakeHandler = (
   event: HostWakeEvent,
   options: { signal: AbortSignal; timeoutMs: number },
-) => Promise<"woken" | "skipped">;
+) => Promise<"woken" | "skipped" | "missing">;
 export const DEFAULT_HOST_WAKE_TIMEOUT_MS = 90_000;
+/** Callers waiting on a wake hear from it this often (MCP progress keeps their clients waiting). */
+const HOST_WAKE_PROGRESS_MS = 10_000;
 
 /** Daemon-owned configuration, identity pinning, retry and routed session lifetime. */
 export class ConnectedHosts {
@@ -419,7 +424,12 @@ export class ConnectedHosts {
    * until its link is online again. It never chooses the route: the caller opens the route to its own
    * serverId afterwards and the usual checks apply. Concurrent callers share one wake per host.
    */
-  async awaitOnline(serverId: string, intent: HostWakeIntent, signal?: AbortSignal): Promise<void> {
+  async awaitOnline(
+    serverId: string,
+    intent: HostWakeIntent,
+    signal?: AbortSignal,
+    waiting?: (elapsedMs: number) => void,
+  ): Promise<void> {
     await this.ready;
     const handler = this.wakeHandler;
     if (!handler || this.closed) return;
@@ -436,14 +446,25 @@ export class ConnectedHosts {
       wake = { done, abort: () => controller.abort() };
       this.wakes.set(row.registrationId, wake);
     }
-    if (!signal) return wake.done;
-    signal.throwIfAborted();
-    await new Promise<void>((resolve, reject) => {
-      const abort = () =>
-        reject(new HostError("host_offline", "The caller stopped waiting for the host", serverId));
-      signal.addEventListener("abort", abort, { once: true });
-      wake.done.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-    });
+    signal?.throwIfAborted();
+    const started = Date.now();
+    const ticker = waiting
+      ? setInterval(() => waiting(Date.now() - started), HOST_WAKE_PROGRESS_MS)
+      : undefined;
+    ticker?.unref();
+    const done = wake.done;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () =>
+          reject(
+            new HostError("host_offline", "The caller stopped waiting for the host", serverId),
+          );
+        signal?.addEventListener("abort", abort, { once: true });
+        done.then(resolve, reject).finally(() => signal?.removeEventListener("abort", abort));
+      });
+    } finally {
+      clearInterval(ticker);
+    }
   }
   private async wake(
     row: Saved,
@@ -467,7 +488,7 @@ export class ConnectedHosts {
     timer.unref();
     const signal = AbortSignal.any([deadline.signal, stopped]);
     try {
-      let outcome: "woken" | "skipped";
+      let outcome: "woken" | "skipped" | "missing";
       try {
         outcome = await handler(
           {
@@ -494,6 +515,12 @@ export class ConnectedHosts {
         throw asleep(`waking it failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       if (outcome === "skipped") return;
+      if (outcome === "missing")
+        throw new HostError(
+          "host_offline",
+          `Host ${label} no longer exists (destroyed); the message was not sent.`,
+          serverId,
+        );
       await this.resetLink(row);
       await this.untilOnline(row, signal).catch((error: unknown) => {
         if (deadline.signal.aborted) throw timedOut();

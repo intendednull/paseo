@@ -75,7 +75,11 @@ export interface HostObservation {
 export interface ToolHosts {
   directory(): Promise<HostDirectory>;
   /** Before an operation that carries work: wakes a sleeping host, or rejects as not sent. */
-  wake(serverId: string, intent: HostWakeIntent): Promise<void>;
+  wake(
+    serverId: string,
+    intent: HostWakeIntent,
+    waiting?: (elapsedMs: number) => void,
+  ): Promise<void>;
   use<T>(
     serverId: string,
     action: (client: DaemonClient) => Promise<T>,
@@ -87,9 +91,9 @@ export interface ToolHosts {
 export function createToolHosts(hosts: ConnectedHosts): ToolHosts {
   return {
     directory: () => hosts.list(),
-    async wake(serverId, intent) {
+    async wake(serverId, intent, waiting) {
       // Before the route client exists, so its connect timeout doesn't run during the wake.
-      await hosts.awaitOnline(serverId, intent).catch((error: unknown) => {
+      await hosts.awaitOnline(serverId, intent, undefined, waiting).catch((error: unknown) => {
         throw new HostOperationRejectedError(error);
       });
     },
@@ -221,12 +225,13 @@ export function createHostResolver(input: {
       serverId: string | undefined,
       action: (host: HostOperations) => Promise<T>,
       wake?: HostWakeIntent,
+      waiting?: (elapsedMs: number) => void,
     ): Promise<T> {
       const destination = serverId ?? input.serverId;
       if (destination === input.serverId) return action(input.local);
       if (input.lockedCwd)
         throw new Error("This caller is restricted to its local working directory");
-      if (wake) await input.hosts().wake(destination, wake);
+      if (wake) await input.hosts().wake(destination, wake, waiting);
       return input.hosts().use(destination, async (client) =>
         action({
           async createAgent(args) {

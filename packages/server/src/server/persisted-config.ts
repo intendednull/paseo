@@ -338,10 +338,10 @@ export const PersistedConfigSchema = z
               .number()
               .int()
               .min(1)
-              .max(600)
+              .max(240)
               .optional()
               .describe(
-                "How long a route that carries work waits for a plugin to wake a sleeping connected host. Defaults to 90.",
+                "How long a route that carries work waits for a plugin to wake a sleeping connected host. Defaults to 90; at most 240, below the 300 s an agent's MCP client waits for a tool call.",
               ),
           })
           .strict()

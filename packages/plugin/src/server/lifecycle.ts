@@ -52,10 +52,12 @@ export interface PluginHostRouteOfflineEvent {
 
 /**
  * `{ skipped: true }` says this plugin does not manage the host: when every handler skips, the route
- * fails at once as it does without the hook. Anything else means the plugin woke the host (or tried);
- * the daemon then reconnects and waits for it. No value can change where the route goes.
+ * fails at once as it does without the hook. `{ missing: true }` says the host no longer exists
+ * (destroyed while still registered): the route fails at once and says so. Anything else means the
+ * plugin woke the host (or tried); the daemon then reconnects and waits for it. No value can change
+ * where the route goes.
  */
-export type PluginHostRouteOfflineResult = { skipped: true } | void;
+export type PluginHostRouteOfflineResult = { skipped: true } | { missing: true } | void;
 
 export interface PluginHookWorktree {
   path: string;

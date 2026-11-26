@@ -27,6 +27,22 @@ function toMcpToolResult(result: PaseoToolResult): CallToolResult {
   };
 }
 
+/** MCP progress for callers that asked for it; clients that reset their timeout on progress wait on. */
+function progressReporter(context?: McpToolContext): ((message: string) => void) | undefined {
+  const token = context?.mcpReq?._meta?.progressToken;
+  if (token === undefined || !context) return undefined;
+  let progress = 0;
+  return (message) => {
+    progress += 1;
+    void context.mcpReq
+      .notify({
+        method: "notifications/progress",
+        params: { progressToken: token, progress, message },
+      })
+      .catch(() => {});
+  };
+}
+
 export async function createAgentMcpServer(options: AgentMcpServerOptions): Promise<McpServer> {
   const catalog = await createPaseoToolCatalog(options);
   const server = new McpServer({
@@ -48,7 +64,10 @@ export async function createAgentMcpServer(options: AgentMcpServerOptions): Prom
       },
       async (args: unknown, context?: McpToolContext) =>
         toMcpToolResult(
-          await catalog.executeTool(tool.name, args, { signal: context?.mcpReq?.signal }),
+          await catalog.executeTool(tool.name, args, {
+            signal: context?.mcpReq?.signal,
+            progress: progressReporter(context),
+          }),
         ),
     );
   }

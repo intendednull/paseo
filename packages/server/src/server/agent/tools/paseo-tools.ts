@@ -804,6 +804,10 @@ function createToolCatalog(
             serverId,
             (host) => host[operation](input, context),
             hostWakeOperations.has(name) ? hostWakeIntent(name) : undefined,
+            (elapsedMs) =>
+              context.progress?.(
+                `Waking host ${destination}: ${Math.round(elapsedMs / 1000)} s so far`,
+              ),
           );
           if (response.isError) await remoteNotification?.reject();
           else remoteNotification?.accept();

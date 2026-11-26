@@ -642,9 +642,9 @@ server.addHook("agent.permission.after", async ({ agent, requestId, resolution }
 
 ## host.route.offline
 
-A route that carries work (`create_agent`, `create_workspace`, `send_agent_prompt` from the daemon MCP, or an app session route opened with `wake`) targets a connected host that is offline. The hook runs on the daemon that owns the registration. Wake the host, then resolve: the daemon resets the host's link, so it reconnects without backoff, and waits until the host is online or `deadline` passes (`daemon.connectedHosts.wakeTimeoutSeconds`, default 90). Status reads and listings never fire it.
+A route that carries work (`create_agent`, `create_workspace`, `send_agent_prompt` from the daemon MCP, or an app session route opened with `wake`) targets a connected host that is offline. The hook runs on the daemon that owns the registration. Wake the host, then resolve: the daemon resets the host's link, so it reconnects without backoff, and waits until the host is online or `deadline` passes (`daemon.connectedHosts.wakeTimeoutSeconds`, default 90, at most 240). Status reads and listings never fire it.
 
-Return `{ skipped: true }` when you don't manage the host; when every handler skips, the route fails at once as it does without the hook. Throw to fail the route: the error says the host is asleep, includes your message, and keeps the code `host_offline`. Nothing you return changes where the route goes, and the payload is a copy without the connection string. Disabled hosts and hosts in `error` are not offered. Concurrent routes to one host share one call.
+Return `{ skipped: true }` when you don't manage the host; when every handler skips, the route fails at once as it does without the hook. Return `{ missing: true }` when the host was destroyed while still registered: the route fails at once with "Host `<label>` no longer exists (destroyed); the message was not sent." Never create a host from this hook. Throw to fail the route: the error says the host is asleep, includes your message, and keeps the code `host_offline`. Nothing you return changes where the route goes, and the payload is a copy without the connection string. Disabled hosts and hosts in `error` are not offered. Concurrent routes to one host share one call.
 
 ```ts
 server.addHook("host.route.offline", async ({ host, operation }, { signal }) => {
