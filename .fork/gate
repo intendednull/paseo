@@ -17,6 +17,7 @@ npm run build:server
 npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/client --workspace=@getpaseo/app --workspace=@getpaseo/desktop
 (cd packages/server && npx vitest run \
   src/server/speech/providers/openai src/server/session/voice \
+  src/server/agent/tts-manager.test.ts \
   src/server/agent/agent-compact.test.ts src/server/agent/idle-compaction \
   src/server/agent/agent-messages src/server/agent/mcp-server.test.ts \
   src/server/agent/agent-run-state.test.ts \
@@ -35,6 +36,6 @@ npm run typecheck --workspace=@getpaseo/server --workspace=@getpaseo/client --wo
   src/utils/workspace-agent-activity.test.ts src/plugins/client-state/snapshots.test.ts \
   src/components/sidebar src/components/sidebar-workspace-list.test.tsx \
   src/stores/sidebar-view-store.test.ts src/stores/download-store.test.ts src/i18n \
-  src/runtime/host-runtime.test.ts)
+  src/runtime/host-runtime.test.ts src/audio/audio-engine.web.test.ts)
 npm run test --workspace=@getpaseo/desktop
 '
