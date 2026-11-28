@@ -6,9 +6,14 @@ import { TTSManager } from "./tts-manager.js";
 import type { TextToSpeechProvider } from "../speech/speech-provider.js";
 import type { SessionOutboundMessage } from "../messages.js";
 
-type AudioOutputMessage = Extract<SessionOutboundMessage, { type: "audio_output" }>;
+type AudioOutputMessage = Extract<
+  SessionOutboundMessage,
+  { type: "audio_output" }
+>;
 
-function isAudioOutputMessage(message: SessionOutboundMessage): message is AudioOutputMessage {
+function isAudioOutputMessage(
+  message: SessionOutboundMessage
+): message is AudioOutputMessage {
   return message.type === "audio_output";
 }
 
@@ -21,9 +26,17 @@ class FakeTts implements TextToSpeechProvider {
   }
 }
 
+// Sentences long enough that no two fit in one synthesis request (4000 chars).
+const longSentence = (label: string) =>
+  `${label} ${"detail ".repeat(320).trim()}.`;
+
 describe("TTSManager", () => {
   it("emits chunks and resolves once confirmed", async () => {
-    const manager = new TTSManager("s1", pino({ level: "silent" }), new FakeTts());
+    const manager = new TTSManager(
+      "s1",
+      pino({ level: "silent" }),
+      new FakeTts()
+    );
     const abort = new AbortController();
     const emitted: SessionOutboundMessage[] = [];
 
@@ -36,7 +49,7 @@ describe("TTSManager", () => {
         }
       },
       abort.signal,
-      true,
+      true
     );
 
     await task;
@@ -46,7 +59,7 @@ describe("TTSManager", () => {
     const audioMessage = emitted.find(isAudioOutputMessage);
     expect(audioMessage).toBeDefined();
     expect(audioMessage?.payload.groupId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     );
     expect(audioMessage?.payload.chunkIndex).toBe(0);
     expect(audioMessage?.payload.isLastChunk).toBe(true);
@@ -55,7 +68,9 @@ describe("TTSManager", () => {
   it("splits long text into safe synthesis segments", async () => {
     const calls: string[] = [];
     const tts: TextToSpeechProvider = {
-      async synthesizeSpeech(text: string): Promise<{ stream: Readable; format: string }> {
+      async synthesizeSpeech(
+        text: string
+      ): Promise<{ stream: Readable; format: string }> {
         calls.push(text);
         return {
           stream: Readable.from([Buffer.from("x")]),
@@ -78,20 +93,87 @@ describe("TTSManager", () => {
         }
       },
       abort.signal,
-      true,
+      true
     );
 
+    // A whole reply goes to the provider in one request, so prosody runs across sentences.
+    expect(calls).toEqual([longText]);
+
+    calls.length = 0;
+    const veryLongText = Array.from({ length: 600 })
+      .map((_, i) => `Sentence ${i + 1}.`)
+      .join(" ");
+    await manager.generateAndWaitForPlayback(
+      veryLongText,
+      (msg) => {
+        if (msg.type === "audio_output") {
+          manager.confirmAudioPlayed(msg.payload.id);
+        }
+      },
+      abort.signal,
+      true
+    );
+
+    // Only very long replies split, on sentence boundaries, without losing text.
     expect(calls.length).toBeGreaterThan(1);
-    expect(calls.every((text) => text.length <= 260)).toBe(true);
-    expect(calls[0].length).toBeLessThanOrEqual(120);
-    expect(calls.slice(1).some((text) => text.length > calls[0].length)).toBe(true);
+    expect(
+      calls.every((text) => text.length <= 4000 && text.endsWith("."))
+    ).toBe(true);
+    expect(calls.join(" ")).toBe(veryLongText);
+  });
+
+  it("streams pcm in growing chunks and marks only the last one", async () => {
+    const second = 24000 * 2;
+    const tts: TextToSpeechProvider = {
+      async synthesizeSpeech(): Promise<{ stream: Readable; format: string }> {
+        // 5 s of audio arriving in 0.1 s pieces.
+        return {
+          stream: Readable.from(
+            Array.from({ length: 50 }, () => Buffer.alloc(second / 10, 1))
+          ),
+          format: "pcm",
+        };
+      },
+    };
+
+    const manager = new TTSManager("s1", pino({ level: "silent" }), tts);
+    const chunks: { index: number; bytes: number; last: boolean }[] = [];
+    await manager.generateAndWaitForPlayback(
+      "Hello there.",
+      (msg) => {
+        if (msg.type === "audio_output") {
+          chunks.push({
+            index: msg.payload.chunkIndex,
+            bytes: Buffer.from(msg.payload.audio, "base64").length,
+            last: msg.payload.isLastChunk,
+          });
+          manager.confirmAudioPlayed(msg.payload.id);
+        }
+      },
+      new AbortController().signal,
+      true
+    );
+
+    expect(chunks.length).toBeGreaterThan(3);
+    expect(chunks.map((c) => c.index)).toEqual(chunks.map((_, i) => i));
+    expect(chunks.filter((c) => c.last)).toEqual([chunks[chunks.length - 1]]);
+    expect(chunks[0].bytes).toBe(Math.round(0.8 * second));
+    expect(chunks.every((c) => c.bytes % 2 === 0 && c.bytes > 0)).toBe(true);
+    for (let i = 1; i < chunks.length - 1; i += 1) {
+      expect(chunks[i].bytes).toBeLessThanOrEqual(
+        Math.ceil(chunks[i - 1].bytes * 1.1) + 2
+      );
+    }
+    expect(chunks.reduce((n, c) => n + c.bytes, 0)).toBe(5 * second);
   });
 
   it("prefetches the next segment before current playback completes", async () => {
     const started: string[] = [];
     const gateResolvers = new Map<string, () => void>();
     const tts: TextToSpeechProvider = {
-      async synthesizeSpeech(text: string): Promise<{ stream: Readable; format: string }> {
+      async synthesizeSpeech(
+        text: string
+      ): Promise<{ stream: Readable; format: string }> {
         started.push(text);
         await new Promise<void>((resolve) => {
           gateResolvers.set(text, resolve);
@@ -106,9 +188,9 @@ describe("TTSManager", () => {
     const manager = new TTSManager("s1", pino({ level: "silent" }), tts);
     const abort = new AbortController();
     const segments = [
-      "One sentence that is long enough to stand alone in the first voice chunk.",
-      "Two sentence that is also long enough to require a separate synthesized group.",
-      "Three sentence that should only be synthesized after playback of the first group starts because it carries extra detail about the lookahead pipeline and should exceed the later packing target on its own.",
+      longSentence("One"),
+      longSentence("Two"),
+      longSentence("Three"),
     ];
     const text = segments.join(" ");
     const emittedGroups: string[] = [];
@@ -135,7 +217,7 @@ describe("TTSManager", () => {
         manager.confirmAudioPlayed(msg.payload.id);
       },
       abort.signal,
-      true,
+      true
     );
 
     expect(started).toEqual([segments[0], segments[1]]);
@@ -168,20 +250,21 @@ describe("TTSManager", () => {
   it("destroys prefetched streams after abort", async () => {
     const destroyed: string[] = [];
     const tts: TextToSpeechProvider = {
-      async synthesizeSpeech(text: string): Promise<{ stream: Readable; format: string }> {
+      async synthesizeSpeech(
+        text: string
+      ): Promise<{ stream: Readable; format: string }> {
         const stream = new Readable({
           read() {
             this.push(Buffer.from(text));
             this.push(null);
           },
         });
-        const destroySpy = vi.spyOn(stream, "destroy").mockImplementation(function (
-          this: Readable,
-          error?: Error,
-        ) {
-          destroyed.push(text);
-          return Readable.prototype.destroy.call(this, error);
-        });
+        const destroySpy = vi
+          .spyOn(stream, "destroy")
+          .mockImplementation(function (this: Readable, error?: Error) {
+            destroyed.push(text);
+            return Readable.prototype.destroy.call(this, error);
+          });
         void destroySpy;
         return {
           stream,
@@ -196,9 +279,9 @@ describe("TTSManager", () => {
 
     const task = manager.generateAndWaitForPlayback(
       [
-        "First sentence that is long enough to stand alone in the first synthesized group.",
-        "Second sentence that should be prefetched and then discarded after abort is requested.",
-        "Third sentence that should also be cleaned up if it was prefetched before the abort.",
+        longSentence("First"),
+        longSentence("Second"),
+        longSentence("Third"),
       ].join(" "),
       (msg) => {
         if (msg.type === "audio_output" && firstChunkId === null) {
@@ -206,7 +289,7 @@ describe("TTSManager", () => {
         }
       },
       abort.signal,
-      true,
+      true
     );
 
     await vi.waitFor(() => {
@@ -230,12 +313,15 @@ describe("TTSManager", () => {
 
     try {
       const tts: TextToSpeechProvider = {
-        async synthesizeSpeech(): Promise<{ stream: Readable; format: string }> {
+        async synthesizeSpeech(): Promise<{
+          stream: Readable;
+          format: string;
+        }> {
           const stream = Readable.from(
             (async function* () {
               yield Buffer.from("a");
               throw new Error("stream exploded");
-            })(),
+            })()
           );
           return {
             stream,
@@ -256,8 +342,8 @@ describe("TTSManager", () => {
             }
           },
           abort.signal,
-          true,
-        ),
+          true
+        )
       ).rejects.toThrow("stream exploded");
 
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -283,14 +369,15 @@ describe("TTSManager", () => {
         }
       },
       abort.signal,
-      true,
+      true
     );
 
     const firstAudio = emitted.find((msg) => msg.type === "audio_output");
     expect(firstAudio?.type).toBe("audio_output");
 
     manager.confirmAudioPlayed(
-      (firstAudio as Extract<SessionOutboundMessage, { type: "audio_output" }>).payload.id,
+      (firstAudio as Extract<SessionOutboundMessage, { type: "audio_output" }>)
+        .payload.id
     );
 
     expect(warnSpy).not.toHaveBeenCalled();
