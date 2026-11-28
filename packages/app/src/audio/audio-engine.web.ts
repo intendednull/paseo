@@ -19,6 +19,11 @@ function getAudioContextCtor(): typeof AudioContext | null {
   return browserWindow.AudioContext ?? browserWindow.webkitAudioContext ?? null;
 }
 
+// Streamed PCM arrives as consecutive chunks of one utterance. Each chunk is scheduled on the
+// AudioContext timeline right where the previous one ends, and play() resolves this long before
+// the chunk finishes, so the queue hands over the next chunk in time: no gap at the joins.
+const PCM_HANDOFF_LEAD_SEC = 0.12;
+
 function pcm16LeToAudioBuffer(
   context: AudioContext,
   bytes: Uint8Array,
@@ -62,6 +67,8 @@ export function createAudioEngine(
     gain: GainNode | null;
     started: boolean;
     muted: boolean;
+    pcmEndsAt: number;
+    sounding: Set<AudioBufferSourceNode>;
   } = {
     playbackContext: null,
     captureContext: null,
@@ -71,6 +78,8 @@ export function createAudioEngine(
     gain: null,
     started: false,
     muted: false,
+    pcmEndsAt: 0,
+    sounding: new Set(),
   };
 
   async function ensurePlaybackContext(): Promise<AudioContext> {
@@ -137,9 +146,21 @@ export function createAudioEngine(
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(context.destination);
+    const isPcm = type.startsWith("audio/pcm");
 
     return await new Promise<number>((resolve, reject) => {
+      let settled = false;
+      let handoff: ReturnType<typeof setTimeout> | null = null;
+      const settle = () => {
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        if (handoff) clearTimeout(handoff);
+      };
       const abort = () => {
+        if (settled) return;
+        settle();
+        refs.sounding.delete(source);
+        refs.pcmEndsAt = 0;
         source.stop();
         source.disconnect();
         reject(new Error("Playback stopped"));
@@ -148,20 +169,57 @@ export function createAudioEngine(
       source.addEventListener(
         "ended",
         () => {
-          signal.removeEventListener("abort", abort);
+          refs.sounding.delete(source);
           source.disconnect();
-          resolve(durationSec);
+          if (!settled) {
+            settle();
+            resolve(durationSec);
+          }
         },
         { once: true },
       );
       try {
-        source.start();
+        if (isPcm) {
+          // Continue right after the previous PCM chunk if it is still sounding.
+          const startAt = Math.max(context.currentTime, refs.pcmEndsAt);
+          refs.pcmEndsAt = startAt + durationSec;
+          refs.sounding.add(source);
+          source.start(startAt);
+          const untilHandoff = refs.pcmEndsAt - context.currentTime - PCM_HANDOFF_LEAD_SEC;
+          handoff = setTimeout(
+            () => {
+              if (settled) return;
+              settle();
+              resolve(durationSec);
+            },
+            Math.max(0, untilHandoff * 1000),
+          );
+        } else {
+          refs.pcmEndsAt = 0;
+          source.start();
+        }
       } catch (error) {
-        signal.removeEventListener("abort", abort);
+        settle();
+        refs.sounding.delete(source);
         source.disconnect();
         reject(error);
       }
     });
+  }
+
+  // Stopping playback also silences chunks already handed off but still sounding.
+  function stopPlayback(): void {
+    playback.stop();
+    for (const source of refs.sounding) {
+      try {
+        source.stop();
+      } catch {
+        // already stopped
+      }
+      source.disconnect();
+    }
+    refs.sounding.clear();
+    refs.pcmEndsAt = 0;
   }
 
   const playback = createPlaybackQueue(playAudio);
@@ -313,7 +371,7 @@ export function createAudioEngine(
     },
 
     play: playback.play,
-    stop: playback.stop,
+    stop: stopPlayback,
     clearQueue: playback.clearQueue,
     isPlaying: playback.isPlaying,
   };
