@@ -68,6 +68,7 @@ The commit trailers are authoritative; this is the summary.
 | fix(app): reorder the sidebar on a 30 s tick, not on every update          | upstream steadies the sidebar order under live activity      |
 | feat(voice): speak whole replies and stream TTS audio as it arrives        | upstream streams TTS audio and synthesizes whole replies     |
 | feat(app): play streamed PCM chunks gaplessly in the web audio engine      | upstream's web audio engine schedules streamed PCM gaplessly |
+| feat(app): play streamed PCM chunks gaplessly on the native audio engine   | upstream's native audio engine queues streamed PCM gaplessly |
 
 ## Branches
 
