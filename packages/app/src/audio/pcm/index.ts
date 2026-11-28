@@ -91,6 +91,13 @@ interface PcmOutput {
   stopPlayback(): void;
 }
 
+/**
+ * Streamed voice arrives as consecutive PCM chunks. The native player queues them on one
+ * continuous stream, so resolving this long before a chunk finishes lets the playback queue
+ * hand over the next chunk before the stream drains: no gap at the joins.
+ */
+export const PCM_HANDOFF_LEAD_SEC = 0.12;
+
 /** Keep voice output on the native communication engine and its echo reference. */
 export function playPcm16(
   bytes: Uint8Array,
@@ -112,10 +119,13 @@ export function playPcm16(
     try {
       output.resumePlayback();
       output.playPCMData(pcm);
-      timeout = setTimeout(() => {
-        signal.removeEventListener("abort", abort);
-        resolve(duration);
-      }, duration * 1000);
+      timeout = setTimeout(
+        () => {
+          signal.removeEventListener("abort", abort);
+          resolve(duration);
+        },
+        Math.max(0, duration - PCM_HANDOFF_LEAD_SEC) * 1000,
+      );
     } catch (error) {
       signal.removeEventListener("abort", abort);
       reject(error);

@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createPlayAudio } from "./play-audio";
 import { playPcm16, parsePcmSampleRate, resampleToPcm16 } from "./pcm";
 import { playFile, type FilePlaybackStatus, type FilePlayer } from "./file-playback";
@@ -199,4 +199,28 @@ test("voice playback shares PCM sample-rate parsing", () => {
   expect(parsePcmSampleRate("audio/PCM;RATE=48000")).toBe(48000);
   expect(parsePcmSampleRate("audio/pcm")).toBeNull();
   expect(parsePcmSampleRate("audio/pcm;rate=0")).toBeNull();
+});
+
+test("voice PCM hands over before the chunk finishes so the next one queues gaplessly", async () => {
+  vi.useFakeTimers();
+  try {
+    let done = false;
+    // 1 s of 16 kHz PCM: resolves 120 ms early, while the native stream is still playing it.
+    const result = playPcm16(
+      new Uint8Array(32000),
+      "audio/pcm;rate=16000;bits=16",
+      new AbortController().signal,
+      { resumePlayback() {}, playPCMData() {}, stopPlayback() {} },
+    ).then((duration) => {
+      done = true;
+      return duration;
+    });
+    await vi.advanceTimersByTimeAsync(870);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(done).toBe(true);
+    expect(await result).toBe(1);
+  } finally {
+    vi.useRealTimers();
+  }
 });

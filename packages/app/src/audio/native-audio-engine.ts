@@ -8,7 +8,7 @@ import type {
 import { AudioCaptureStartError } from "./audio-engine-types";
 import { createNativeEngineLease, type NativeEngineLease } from "./native-engine-lease";
 import { createPlaybackQueue } from "./playback";
-import { playPcm16 } from "./pcm";
+import { PCM_HANDOFF_LEAD_SEC, playPcm16 } from "./pcm";
 
 interface NativeSubscription {
   remove(): void;
@@ -207,7 +207,11 @@ export function createNativeAudioEngine(
       isCaptureActive: () => refs.captureActive,
     });
   }
-  const playback = createPlaybackQueue(playAudio, releaseSessionIfIdle);
+  // playPcm16 resolves PCM_HANDOFF_LEAD_SEC before a chunk finishes, so an idle queue can still
+  // be sounding its last chunk: release the session only once that tail has played.
+  const playback = createPlaybackQueue(playAudio, () => {
+    setTimeout(releaseSessionIfIdle, PCM_HANDOFF_LEAD_SEC * 1000 + 50);
+  });
 
   return {
     async initialize() {
